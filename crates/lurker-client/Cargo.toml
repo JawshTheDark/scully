@@ -1,0 +1,24 @@
+[package]
+name = "lurker-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Transport and state management for the Lurker client protocol"
+
+[dependencies]
+async-channel = "2.5.0"
+futures-util.workspace = true
+lurker-proto = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio.workspace = true
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+tracing.workspace = true
+url = "2.5.8"
+
+[dev-dependencies]
+lurker-proto = { path = "../lurker-proto" }
+serde_json = { workspace = true }

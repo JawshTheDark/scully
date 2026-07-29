@@ -1,0 +1,492 @@
+// The settings window.
+//
+// Generated entirely from the server's self-describing registry
+// (`GET /api/settings/bootstrap`), per §10: types, bounds, enum choices,
+// labels, grouping and defaults all come from the wire, so a server that adds
+// a setting shows it here with no client change. Hardcoding keys is exactly
+// what the doc warns against.
+//
+// Layout: category sidebar on the left (first-seen order from the registry),
+// grouped rows on the right. Each row: label, dotted key as a power-user
+// subtitle, description, the type-appropriate control, and a reset button.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gtk::glib;
+use gtk::prelude::*;
+
+use lurker_client::SettingOption;
+
+use crate::app::AppRef;
+
+/// Display labels for category ids (cosmetic; unknown ids are prettified).
+fn category_label(id: &str) -> String {
+    match id {
+        "appearance" => "Appearance".into(),
+        "chat" => "Chat".into(),
+        "events" => "Events".into(),
+        "input" => "Input bar".into(),
+        "uploads" => "Uploads".into(),
+        "notifications" => "Notifications".into(),
+        "away" => "Away".into(),
+        DEVICE_CATEGORY => device_label(),
+        other => prettify(other),
+    }
+}
+
+fn device_label() -> String {
+    "This device".to_string()
+}
+
+fn prettify(id: &str) -> String {
+    let mut out = String::new();
+    for (i, part) in id.split(['-', '_', '.']).enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            if i == 0 {
+                out.extend(first.to_uppercase());
+            } else {
+                out.push(first);
+            }
+            out.push_str(chars.as_str());
+        }
+    }
+    out
+}
+
+/// Synthetic category id for device-local settings.
+const DEVICE_CATEGORY: &str = "__device";
+
+pub struct SettingsWindow {
+    app: AppRef,
+    window: gtk::Window,
+    sidebar: gtk::ListBox,
+    pane: gtk::Box,
+    categories: RefCell<Vec<String>>,
+}
+
+impl SettingsWindow {
+    pub fn open(app: &AppRef) {
+        // The window the WM should place this in front of.
+        let parent = app.gtk_app.active_window();
+
+        // Single instance: re-present rather than stacking windows.
+        if let Some(existing) = app.settings_window.borrow().as_ref() {
+            if let Some(p) = &parent {
+                existing.window.set_transient_for(Some(p));
+            }
+            existing.window.present();
+            return;
+        }
+
+        let mut builder = gtk::Window::builder()
+            .title("Scully — settings")
+            .default_width(860)
+            .default_height(640)
+            // Anchor to the active window so the WM opens it in front and
+            // centered on the parent, not off-screen or behind (a top-level
+            // with no transient parent is placed wherever the WM likes).
+            .destroy_with_parent(true);
+        if let Some(p) = &parent {
+            builder = builder.transient_for(p);
+        }
+        let window = builder.build();
+        window.add_css_class("settings");
+
+        let sidebar = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::Single)
+            .css_classes(["settings-sidebar"])
+            .build();
+        let sidebar_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&sidebar)
+            .build();
+        sidebar_scroll.set_size_request(180, -1);
+
+        let pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        pane.add_css_class("settings-pane");
+        let pane_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&pane)
+            .hexpand(true)
+            .build();
+
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        root.append(&sidebar_scroll);
+        root.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        root.append(&pane_scroll);
+        window.set_child(Some(&root));
+
+        let this = Rc::new(SettingsWindow {
+            app: app.clone(),
+            window,
+            sidebar,
+            pane,
+            categories: RefCell::new(Vec::new()),
+        });
+
+        this.build_sidebar();
+
+        let handler = this.clone();
+        this.sidebar.connect_row_selected(move |_, row| {
+            let Some(row) = row else { return };
+            let idx = row.index() as usize;
+            let cat = handler.categories.borrow().get(idx).cloned();
+            if let Some(cat) = cat {
+                handler.populate(&cat);
+            }
+        });
+        if let Some(first) = this.sidebar.row_at_index(0) {
+            this.sidebar.select_row(Some(&first));
+        }
+
+        let owner = app.clone();
+        this.window.connect_close_request(move |_| {
+            owner.settings_window.replace(None);
+            glib::Propagation::Proceed
+        });
+
+        this.window.present();
+        *app.settings_window.borrow_mut() = Some(this);
+    }
+
+    fn build_sidebar(&self) {
+        // Categories in first-seen registry order; the registry itself is
+        // ordered sensibly, so no client-side taxonomy needed. One synthetic
+        // category leads: device-local preferences the server doesn't sync.
+        let registry = self.app.settings_registry.borrow();
+        let mut seen: Vec<String> = vec![DEVICE_CATEGORY.to_string()];
+        for opt in registry.iter() {
+            if !opt.category.is_empty() && !seen.contains(&opt.category) {
+                seen.push(opt.category.clone());
+            }
+        }
+        for cat in &seen {
+            let label = gtk::Label::builder()
+                .xalign(0.0)
+                .label(category_label(cat))
+                .css_classes(["settings-category"])
+                .build();
+            self.sidebar.append(&gtk::ListBoxRow::builder().child(&label).build());
+        }
+        *self.categories.borrow_mut() = seen;
+
+        if self.categories.borrow().is_empty() {
+            let msg = gtk::Label::builder()
+                .label("Settings have not loaded yet — is the connection up?")
+                .css_classes(["settings-empty"])
+                .wrap(true)
+                .build();
+            self.pane.append(&msg);
+        }
+    }
+
+    fn populate(&self, category: &str) {
+        let mut child = self.pane.first_child();
+        while let Some(widget) = child {
+            let next = widget.next_sibling();
+            self.pane.remove(&widget);
+            child = next;
+        }
+        if category == DEVICE_CATEGORY {
+            self.populate_device();
+            return;
+        }
+
+        let registry = self.app.settings_registry.borrow();
+        let mut last_group: Option<&str> = None;
+
+        for opt in registry.iter().filter(|o| o.category == category) {
+            if last_group != Some(opt.group.as_str()) {
+                last_group = Some(opt.group.as_str());
+                let heading = gtk::Label::builder()
+                    .xalign(0.0)
+                    .label(prettify(&opt.group))
+                    .css_classes(["settings-group"])
+                    .build();
+                self.pane.append(&heading);
+            }
+            self.pane.append(&self.build_row(opt));
+        }
+    }
+
+    /// Device-local preferences: not server-synced, stored in
+    /// `XDG_CONFIG_HOME/scully/device.json`. Inline media is per-device
+    /// because it is a bandwidth/screen decision, like mobile font size.
+    fn populate_device(&self) {
+        let heading = gtk::Label::builder()
+            .xalign(0.0)
+            .label("Display")
+            .css_classes(["settings-group"])
+            .build();
+        self.pane.append(&heading);
+
+        let toggles: [(&str, &str, fn(&crate::app::DeviceSettings) -> bool,
+                       fn(&mut crate::app::DeviceSettings, bool)); 5] = [
+            (
+                "Show images inline",
+                "Image links render below the message. Fetched once, capped at 15 MB.",
+                |d| d.inline_images,
+                |d, v| d.inline_images = v,
+            ),
+            (
+                "Show videos inline",
+                "Video links get an embedded player. Nothing downloads until you press play.",
+                |d| d.inline_videos,
+                |d, v| d.inline_videos = v,
+            ),
+            (
+                "Show audio inline",
+                "Audio links get playback controls.",
+                |d| d.inline_audio,
+                |d, v| d.inline_audio = v,
+            ),
+            (
+                "Show whois in the active buffer",
+                "Whois replies appear in the channel or DM you ran them from,                  instead of only the server log.",
+                |d| d.whois_in_active_buffer,
+                |d, v| d.whois_in_active_buffer = v,
+            ),
+            (
+                "Fetch YouTube link previews",
+                "Shows the title and description under YouTube links. Off by default: it fetches pages linked in chat.",
+                |d| d.link_previews,
+                |d, v| d.link_previews = v,
+            ),
+        ];
+
+        for (label, description, get, set) in toggles {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            row.add_css_class("settings-row");
+            let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            text.set_hexpand(true);
+            text.append(
+                &gtk::Label::builder()
+                    .xalign(0.0)
+                    .label(label)
+                    .css_classes(["settings-label"])
+                    .build(),
+            );
+            text.append(
+                &gtk::Label::builder()
+                    .xalign(0.0)
+                    .label(description)
+                    .wrap(true)
+                    .css_classes(["settings-desc"])
+                    .build(),
+            );
+            row.append(&text);
+
+            let switch = gtk::Switch::builder()
+                .active(get(&self.app.device.borrow()))
+                .valign(gtk::Align::Center)
+                .build();
+            let app = self.app.clone();
+            switch.connect_state_set(move |_, state| {
+                {
+                    let mut device = app.device.borrow_mut();
+                    set(&mut device, state);
+                    device.save();
+                }
+                // Windows re-render so embeds appear/disappear immediately.
+                app.notify(&[lurker_client::StoreEvent::SettingsChanged]);
+                glib::Propagation::Proceed
+            });
+            row.append(&switch);
+            self.pane.append(&row);
+        }
+
+        let note = gtk::Label::builder()
+            .xalign(0.0)
+            .label(
+                "Stored on this machine only — every other setting in this window                  syncs through your Lurker server.",
+            )
+            .wrap(true)
+            .css_classes(["settings-desc"])
+            .build();
+        self.pane.append(&note);
+    }
+
+    fn build_row(&self, opt: &SettingOption) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.add_css_class("settings-row");
+
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        text.set_hexpand(true);
+        let label = gtk::Label::builder()
+            .xalign(0.0)
+            .label(&opt.label)
+            .css_classes(["settings-label"])
+            .build();
+        let key = gtk::Label::builder()
+            .xalign(0.0)
+            .label(&opt.key)
+            .css_classes(["settings-key"])
+            .build();
+        text.append(&label);
+        text.append(&key);
+        if !opt.description.is_empty() {
+            let desc = gtk::Label::builder()
+                .xalign(0.0)
+                .label(&opt.description)
+                .wrap(true)
+                .css_classes(["settings-desc"])
+                .build();
+            text.append(&desc);
+        }
+        row.append(&text);
+
+        let control = self.build_control(opt);
+        control.set_valign(gtk::Align::Center);
+        row.append(&control);
+
+        // Reset to default. DELETE /api/settings/:key is the authoritative
+        // reset; the reply's values repaint the pane via SettingsChanged.
+        let reset = gtk::Button::builder()
+            .label("↺")
+            .tooltip_text("Reset to default")
+            .css_classes(["settings-reset"])
+            .valign(gtk::Align::Center)
+            .build();
+        let app = self.app.clone();
+        let reset_key = opt.key.clone();
+        let category = opt.category.clone();
+        reset.connect_clicked(move |_| {
+            app.reset_setting(reset_key.clone());
+            // Repaint this pane once the reply lands. The window is read
+            // through the App at fire time, not captured at build time.
+            let app = app.clone();
+            let category = category.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+                let win = app.settings_window.borrow().as_ref().cloned();
+                if let Some(w) = win {
+                    w.populate(&category);
+                }
+            });
+        });
+        row.append(&reset);
+
+        row
+    }
+
+    /// The type-appropriate editor for one option, pre-filled with the
+    /// effective value.
+    fn build_control(&self, opt: &SettingOption) -> gtk::Widget {
+        let app = self.app.clone();
+        let key = opt.key.clone();
+        let value = self.app.setting(&opt.key);
+
+        match opt.setting_type.as_str() {
+            "bool" => {
+                let switch = gtk::Switch::builder()
+                    .active(value.as_bool().unwrap_or(false))
+                    .build();
+                switch.connect_state_set(move |_, state| {
+                    app.set_setting(key.clone(), serde_json::Value::Bool(state));
+                    glib::Propagation::Proceed
+                });
+                switch.upcast()
+            }
+            "int" => {
+                let min = opt.min.unwrap_or(0.0);
+                let max = opt.max.unwrap_or(1_000_000.0);
+                let current = value.as_f64().unwrap_or(min);
+                let spin = gtk::SpinButton::with_range(min, max, 1.0);
+                spin.set_value(current);
+                spin.connect_value_changed(move |s| {
+                    app.set_setting(
+                        key.clone(),
+                        serde_json::Value::Number(serde_json::Number::from(s.value_as_int())),
+                    );
+                });
+                spin.upcast()
+            }
+            "enum" => {
+                let choices = opt.choices.clone().unwrap_or_default();
+                let labels: Vec<String> = choices
+                    .iter()
+                    .map(|c| {
+                        opt.choice_labels
+                            .as_ref()
+                            .and_then(|m| m.get(c))
+                            .cloned()
+                            .unwrap_or_else(|| c.clone())
+                    })
+                    .collect();
+                let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                let dropdown = gtk::DropDown::from_strings(&label_refs);
+                if let Some(current) = value.as_str() {
+                    if let Some(pos) = choices.iter().position(|c| c == current) {
+                        dropdown.set_selected(pos as u32);
+                    }
+                }
+                dropdown.connect_selected_notify(move |d| {
+                    if let Some(choice) = choices.get(d.selected() as usize) {
+                        app.set_setting(key.clone(), serde_json::Value::String(choice.clone()));
+                    }
+                });
+                dropdown.upcast()
+            }
+            "secret" => {
+                // Write-only: the server never returns the stored value, so an
+                // empty field means "unchanged", not "unset".
+                let entry = gtk::PasswordEntry::builder()
+                    .placeholder_text("(unchanged — type to replace)")
+                    .show_peek_icon(true)
+                    .build();
+                entry.connect_activate(move |e| {
+                    let text = e.text().to_string();
+                    if !text.is_empty() {
+                        app.set_setting(key.clone(), serde_json::Value::String(text));
+                        e.set_text("");
+                    }
+                });
+                entry.upcast()
+            }
+            "string-list" => {
+                // Comma-separated editing; committed on Enter.
+                let joined = value
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let entry = gtk::Entry::builder().text(joined).hexpand(false).build();
+                entry.set_width_chars(24);
+                entry.connect_activate(move |e| {
+                    let list: Vec<serde_json::Value> = e
+                        .text()
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| serde_json::Value::String(s.to_string()))
+                        .collect();
+                    app.set_setting(key.clone(), serde_json::Value::Array(list));
+                });
+                entry.upcast()
+            }
+            // `string` and `color`. A colour well would be nicer for `color`,
+            // but a hex-text entry is faithful to what the server stores.
+            _ => {
+                let entry = gtk::Entry::builder()
+                    .text(value.as_str().unwrap_or_default())
+                    .build();
+                entry.set_width_chars(18);
+                entry.connect_activate(move |e| {
+                    app.set_setting(
+                        key.clone(),
+                        serde_json::Value::String(e.text().to_string()),
+                    );
+                });
+                entry.upcast()
+            }
+        }
+    }
+}

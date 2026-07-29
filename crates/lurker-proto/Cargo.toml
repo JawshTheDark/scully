@@ -1,0 +1,15 @@
+[package]
+name = "lurker-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Wire types and pure protocol rules for the Lurker client protocol (version 1)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true }

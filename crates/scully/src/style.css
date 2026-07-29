@@ -1,0 +1,377 @@
+/* Retro terminal theme.
+ *
+ * Follows Lurker's own design-token discipline (docs/DESIGN_TOKENS.md): one
+ * font size throughout, hierarchy expressed with colour and weight rather than
+ * size, and square corners. Message-list colours are NOT here — GtkTextTag
+ * styling is not CSS-driven, so those live in window.rs beside the tags.
+ */
+
+@define-color bg        #16161d;
+@define-color bg_soft   #1c1c25;
+@define-color bg_raised #22222c;
+@define-color fg        #c9c9d4;
+@define-color fg_muted  #6b6b7b;
+@define-color accent    #82aaff;
+@define-color good      #4f8f5f;
+@define-color bad       #ff5370;
+@define-color warn      #ffcb6b;
+@define-color border    #2a2a36;
+
+window {
+  background-color: @bg;
+  color: @fg;
+  font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+  font-size: 10.5pt;
+}
+
+/* ── Sidebars ─────────────────────────────────────────────────────────── */
+
+.sidebar {
+  background-color: @bg_soft;
+}
+
+.buffer-list,
+.member-list {
+  background-color: transparent;
+}
+
+.network-header {
+  color: @fg_muted;
+  font-weight: 700;
+  padding: 10px 10px 4px 10px;
+  letter-spacing: 1px;
+}
+
+.network-header.offline {
+  color: @bad;
+}
+
+row.buffer-row {
+  padding: 1px 10px;
+  min-height: 0;
+}
+
+row.buffer-row label {
+  color: @fg_muted;
+}
+
+row.buffer-row.has-unread label {
+  color: @fg;
+}
+
+row.buffer-row.parted label {
+  /* Parted but not closed: history is still there, so recede rather than hide. */
+  color: #4a4a58;
+}
+
+row.buffer-row:selected {
+  background-color: @bg_raised;
+}
+
+row.buffer-row:selected label {
+  color: @fg;
+  font-weight: 700;
+}
+
+.badge {
+  color: @fg_muted;
+  font-size: 9pt;
+  padding: 0 4px;
+}
+
+.badge-highlight {
+  color: @bg;
+  background-color: @warn;
+  border-radius: 2px;
+  font-weight: 700;
+}
+
+.member {
+  color: @fg_muted;
+  padding: 0 10px;
+}
+
+.member.away {
+  color: #4a4a58;
+}
+
+.member-count {
+  color: @fg_muted;
+  padding: 10px;
+  border-bottom: 1px solid @border;
+}
+
+/* ── Centre column ────────────────────────────────────────────────────── */
+
+.header {
+  padding: 8px 10px;
+  border-bottom: 1px solid @border;
+  background-color: @bg_soft;
+}
+
+.buffer-title {
+  color: @accent;
+  font-weight: 700;
+}
+
+.topic {
+  color: @fg_muted;
+}
+
+.messages {
+  background-color: @bg;
+  color: @fg;
+}
+
+.messages text {
+  background-color: @bg;
+}
+
+.status {
+  color: @fg_muted;
+  padding: 4px 10px;
+  border-top: 1px solid @border;
+  background-color: @bg_soft;
+  font-size: 9.5pt;
+}
+
+.composer {
+  background-color: @bg;
+  color: @fg;
+  border: none;
+  border-top: 1px solid @border;
+  border-radius: 0;
+  padding: 8px 10px;
+  box-shadow: none;
+}
+
+.composer:focus {
+  outline: none;
+  box-shadow: none;
+  border-top: 1px solid @accent;
+}
+
+/* ── Login ────────────────────────────────────────────────────────────── */
+
+.login {
+  background-color: @bg;
+}
+
+.brand {
+  color: @accent;
+  font-size: 26pt;
+  font-weight: 700;
+}
+
+.subtitle {
+  color: @fg_muted;
+  margin-bottom: 10px;
+}
+
+.login entry,
+.login passwordentry {
+  background-color: @bg_soft;
+  color: @fg;
+  border: 1px solid @border;
+  border-radius: 2px;
+  padding: 8px;
+  min-width: 320px;
+}
+
+.login entry:focus,
+.login passwordentry:focus {
+  border-color: @accent;
+}
+
+button.connect {
+  background-image: none;
+  background-color: @accent;
+  color: @bg;
+  border: none;
+  border-radius: 2px;
+  padding: 8px;
+  font-weight: 700;
+}
+
+button.connect:disabled {
+  background-color: @border;
+  color: @fg_muted;
+}
+
+/* Note: GTK CSS has no `max-width`. The wrap point is a widget property,
+ * set via `max_width_chars` in login.rs. */
+.login-status {
+  color: @warn;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────────────── */
+
+button.toolbtn {
+  background-image: none;
+  background-color: transparent;
+  color: @fg_muted;
+  border: 1px solid @border;
+  border-radius: 2px;
+  min-width: 26px;
+  min-height: 22px;
+  padding: 0 6px;
+}
+
+button.toolbtn:hover {
+  color: @fg;
+  border-color: @accent;
+}
+
+/* ── Settings window ──────────────────────────────────────────────────── */
+
+window.settings {
+  background-color: @bg;
+}
+
+.settings-sidebar {
+  background-color: @bg_soft;
+}
+
+.settings-sidebar row {
+  padding: 2px 0;
+}
+
+.settings-sidebar row:selected {
+  background-color: @bg_raised;
+}
+
+.settings-category {
+  color: @fg_muted;
+  padding: 6px 14px;
+}
+
+.settings-sidebar row:selected .settings-category {
+  color: @fg;
+  font-weight: 700;
+}
+
+.settings-pane {
+  padding: 12px 18px;
+}
+
+.settings-group {
+  color: @accent;
+  font-weight: 700;
+  padding: 14px 0 4px 0;
+  letter-spacing: 1px;
+}
+
+.settings-row {
+  padding: 8px 0;
+  border-bottom: 1px solid @border;
+}
+
+.settings-label {
+  color: @fg;
+  font-weight: 600;
+}
+
+.settings-key {
+  color: #4a4a58;
+  font-size: 8.5pt;
+}
+
+.settings-desc {
+  color: @fg_muted;
+  font-size: 9.5pt;
+}
+
+.settings-row entry,
+.settings-row spinbutton {
+  background-color: @bg_soft;
+  color: @fg;
+  border: 1px solid @border;
+  border-radius: 2px;
+}
+
+.settings-row dropdown > button {
+  background-image: none;
+  background-color: @bg_soft;
+  color: @fg;
+  border: 1px solid @border;
+  border-radius: 2px;
+}
+
+button.settings-reset {
+  background-image: none;
+  background-color: transparent;
+  color: @fg_muted;
+  border: none;
+  padding: 0 4px;
+}
+
+button.settings-reset:hover {
+  color: @bad;
+}
+
+.settings-empty {
+  color: @fg_muted;
+  padding: 20px;
+}
+
+/* ── Channel control dialog ───────────────────────────────────────────── */
+
+window.chanctl {
+  background-color: @bg;
+}
+
+.chanctl-heading {
+  color: @accent;
+  font-weight: 700;
+  margin-top: 6px;
+  letter-spacing: 1px;
+}
+
+.chanctl-topic {
+  color: @fg;
+  background-color: @bg_soft;
+  border: 1px solid @border;
+  border-radius: 2px;
+  padding: 8px;
+}
+
+.chanctl-current {
+  color: @fg_muted;
+}
+
+window.chanctl entry {
+  background-color: @bg_soft;
+  color: @fg;
+  border: 1px solid @border;
+  border-radius: 2px;
+}
+
+window.chanctl button {
+  background-image: none;
+  background-color: @bg_raised;
+  color: @fg;
+  border: 1px solid @border;
+  border-radius: 2px;
+}
+
+window.chanctl checkbutton {
+  color: @fg;
+}
+
+/* DCC chat rows in the buffer list — visually distinct from server DMs. */
+row.buffer-row.dcc label {
+  color: #c792ea;
+  font-style: italic;
+}
+
+/* Channel-control list results (ban / except / invite entries). */
+.chanctl-list {
+  background-color: @bg_soft;
+  border: 1px solid @border;
+  border-radius: 2px;
+}
+
+.chanctl-list row label {
+  color: @fg;
+  padding: 2px 8px;
+}

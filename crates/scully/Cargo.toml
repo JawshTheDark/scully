@@ -1,0 +1,48 @@
+[package]
+name = "scully"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Voice/video calls via LiveKit. OFF by default: it pulls a prebuilt libwebrtc
+# (large download, needs clang) through webrtc-sys. Enabling it is a deliberate
+# `--features voice` build. The rest of the app never depends on it, so the
+# default build stays lean and portable. This is a native media engine, not a
+# webview — libwebrtc links in exactly like GTK does.
+default = []
+voice = ["dep:livekit", "dep:cpal", "dep:futures-util", "dep:livekit-data-stream", "dep:livekit-protocol"]
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+async-channel = "2.5.0"
+gtk = { version = "0.11.4", package = "gtk4", features = ["v4_12"] }
+keyring = { version = "4.1.5", features = ["zbus-secret-service-keyring-store"] }
+lurker-client = { workspace = true }
+lurker-proto.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url = "2.5.8"
+
+# Voice feature only. livekit brings the WebRTC transport + codecs; cpal does the
+# actual mic capture / speaker playback that libwebrtc's Rust SDK leaves to us.
+# Pinned to the 0.7 line: 0.8.0/0.8.1 are broken releases (their pinned
+# livekit-common 0.1.0 dropped symbols the sibling crates still import, so the
+# published tree does not compile). 0.7.53 is the last mature pre-rewrite build.
+livekit = { version = "0.7", default-features = false, features = ["rustls-tls-native-roots", "tokio"], optional = true }
+cpal = { version = "0.15", optional = true }
+# StreamExt, to pull decoded frames off each remote participant's audio stream.
+futures-util = { version = "0.3", optional = true }
+# Two version pins, not used directly — they correct broken transitive
+# resolution in the livekit 0.7.53 tree (its sub-crates declare loose ranges that
+# cargo fills with newer, incompatible releases):
+#   - livekit-data-stream: newest (0.1.1) imports symbols dropped from
+#     livekit-common 0.1.0 and won't compile; 0.1.0 predates that and is clean.
+#   - livekit-protocol: newest (0.7.12) added a required field to a generated
+#     protobuf struct (ConnectWhatsAppCallRequest.wait_until_answered) that
+#     livekit-api 0.5.6 constructs without — 0.7.10 is the last version before it.
+livekit-data-stream = { version = "=0.1.0", optional = true }
+livekit-protocol = { version = "=0.7.10", optional = true }

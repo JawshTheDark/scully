@@ -1,0 +1,9 @@
+/target
+/upstream
+/.verify
+/.tmp
+
+# session byproducts
+/a.txt
+/voice-livekit.patch
+/voice-livekit-PR.md
