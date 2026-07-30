@@ -25,7 +25,6 @@ mod theme;
 mod voice;
 #[cfg(feature = "voice")]
 mod callwindow;
-mod voicesig;
 mod whois;
 mod window;
 

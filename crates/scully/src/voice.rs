@@ -103,11 +103,6 @@ pub struct Call {
 }
 
 impl Call {
-    /// Whether the microphone is currently muted.
-    pub fn is_muted(&self) -> bool {
-        self.muted.load(Ordering::Relaxed)
-    }
-
     /// Mute or unmute the microphone. Muting keeps publishing — it feeds silence
     /// — so the remote side sees us as present-but-quiet rather than gone.
     pub fn set_muted(&self, muted: bool) {

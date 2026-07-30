@@ -455,6 +455,18 @@ pub enum ServerFrame {
         percent: Option<f64>,
     },
     Export(serde_json::Value),
+    /// A voice call's participant count changed in a channel (Lurker #680).
+    /// Its own top-level frame, driven by LiveKit webhooks — deliberately NOT an
+    /// `irc` event, so it never rides the resume cursor. Carries live deltas
+    /// only; the full picture is fetched once per (re)connect from
+    /// `GET /api/voice/presence`. `count` is the number in the call (0 = ended).
+    #[serde(rename_all = "camelCase")]
+    CallPresence {
+        network_id: i64,
+        target: String,
+        #[serde(default)]
+        count: u32,
+    },
     /// Non-fatal by contract — also the reply to an unknown verb. The socket
     /// stays open (§2).
     #[serde(rename_all = "camelCase")]
@@ -483,6 +495,20 @@ mod tests {
             parse(r##"{"kind":"time-travel","payload":{"x":1}}"##),
             ServerFrame::Unknown
         ));
+    }
+
+    #[test]
+    fn call_presence_frame_parses_with_camelcase_fields() {
+        // Lurker #680: a top-level presence frame, camelCase fields under the
+        // kebab-case `kind` tag. count defaults to 0 (call ended) when absent.
+        let f = parse(r##"{"kind":"call-presence","networkId":7,"target":"#dev","count":3}"##);
+        let ServerFrame::CallPresence { network_id, target, count } = f else {
+            panic!("expected call-presence");
+        };
+        assert_eq!((network_id, target.as_str(), count), (7, "#dev", 3));
+
+        let ended = parse(r##"{"kind":"call-presence","networkId":7,"target":"#dev"}"##);
+        assert!(matches!(ended, ServerFrame::CallPresence { count: 0, .. }));
     }
 
     #[test]

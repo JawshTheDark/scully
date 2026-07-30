@@ -1039,6 +1039,9 @@ impl ChatWindow {
                 // The finder windows own their own result rendering.
                 StoreEvent::SearchResults => {}
                 StoreEvent::PausedChanged(_) => status = true,
+                // A call started/ended/changed size somewhere — repaint the
+                // buffer list so its "call active (N)" badge is current.
+                StoreEvent::CallPresenceChanged(_) => relist = true,
                 StoreEvent::Notify(key, event) => self.raise_notification(key, event),
                 StoreEvent::Error(msg) => {
                     self.status_label.set_text(msg);
@@ -1275,6 +1278,19 @@ impl ChatWindow {
                     .ellipsize(gtk::pango::EllipsizeMode::End)
                     .build();
                 row_box.append(&name);
+
+                // Voice-call badge (Lurker #680): shown for any channel with an
+                // active call, whether or not you're in it. The 📞 toolbar
+                // button / `/call` joins it.
+                let call_n = store.call_count(&key);
+                if call_n > 0 {
+                    let call_badge = gtk::Label::builder()
+                        .label(format!("\u{1F4DE} {call_n}"))
+                        .css_classes(["badge", "badge-call"])
+                        .tooltip_text("Voice call in progress — press 📞 or /call to join")
+                        .build();
+                    row_box.append(&call_badge);
+                }
 
                 let (unread, highlights) =
                     buf.map(|b| (b.unread, b.highlights)).unwrap_or((0, 0));

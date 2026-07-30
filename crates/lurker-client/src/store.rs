@@ -60,6 +60,10 @@ pub enum StoreEvent {
     /// `settings` frame). Windows re-render, since tier/consolidation are
     /// display choices.
     SettingsChanged,
+    /// A voice call's participant count changed in a channel (Lurker #680), so
+    /// any "call active (N)" badge on that buffer should be recomputed. Carries
+    /// the affected buffer.
+    CallPresenceChanged(BufferKey),
     /// A non-fatal server error frame.
     Error(String),
 }
@@ -226,6 +230,12 @@ pub struct Store {
     /// drop every nicklist. Applying it on materialisation instead is what
     /// makes the burst order irrelevant.
     snapshot_channels: HashMap<BufferKey, (Option<String>, Option<String>, Vec<Member>)>,
+
+    /// Live voice-call participant counts per buffer (Lurker #680). Fed by the
+    /// `call-presence` frame and by REST hydration on connect. Absent key or 0
+    /// means no active call. Kept independent of `Buffer` so a call can be shown
+    /// on a channel whose buffer isn't materialised yet.
+    call_counts: HashMap<BufferKey, u32>,
 }
 
 impl Store {
@@ -250,6 +260,48 @@ impl Store {
 
     pub fn buffer(&self, key: &BufferKey) -> Option<&Buffer> {
         self.buffers.get(key)
+    }
+
+    /// Number of participants in the active voice call for this buffer, or 0 if
+    /// there is no call (Lurker #680).
+    pub fn call_count(&self, key: &BufferKey) -> u32 {
+        self.call_counts.get(key).copied().unwrap_or(0)
+    }
+
+    /// Replace a network's known call counts with a fresh server snapshot from
+    /// `GET /api/voice/presence`. Called on each (re)connect edge, because the
+    /// `call-presence` frame carries only live deltas — without this, a client
+    /// that attaches mid-call never sees the badge. Clears this network's stale
+    /// entries first, so a call that ended while we were away disappears.
+    /// Returns the buffers whose count changed, for targeted redraws.
+    pub fn hydrate_call_presence(
+        &mut self,
+        network_id: i64,
+        calls: &[(String, u32)],
+    ) -> Vec<BufferKey> {
+        let mut changed = Vec::new();
+        let fresh: HashMap<BufferKey, u32> = calls
+            .iter()
+            .filter(|(_, c)| *c > 0)
+            .map(|(t, c)| (BufferKey::new(Some(network_id), t), *c))
+            .collect();
+        // Drop stale entries for this network that aren't in the snapshot.
+        let stale: Vec<BufferKey> = self
+            .call_counts
+            .keys()
+            .filter(|k| k.network_id == Some(network_id) && !fresh.contains_key(k))
+            .cloned()
+            .collect();
+        for k in stale {
+            self.call_counts.remove(&k);
+            changed.push(k);
+        }
+        for (k, c) in fresh {
+            if self.call_counts.insert(k.clone(), c) != Some(c) {
+                changed.push(k);
+            }
+        }
+        changed
     }
 
     /// Inject synthetic, non-persisted display lines into a buffer (e.g. a
@@ -410,6 +462,17 @@ impl Store {
             ServerFrame::Settings { max_upload_bytes, .. } => {
                 if let Some(cap) = max_upload_bytes {
                     self.max_upload_bytes = Some(cap);
+                }
+            }
+            ServerFrame::CallPresence { network_id, target, count } => {
+                let key = BufferKey::new(Some(network_id), &target);
+                let changed = if count > 0 {
+                    self.call_counts.insert(key.clone(), count) != Some(count)
+                } else {
+                    self.call_counts.remove(&key).is_some()
+                };
+                if changed {
+                    out.push(StoreEvent::CallPresenceChanged(key));
                 }
             }
             ServerFrame::Error { text } => {

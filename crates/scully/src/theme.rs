@@ -101,7 +101,8 @@ fn build_css(app: &AppRef) -> String {
          .member-halfop { color: @member_halfop; }\n\
          .member-voice { color: @member_voice; }\n\
          .badge { color: @buffer_unread; }\n\
-         .badge-highlight { background-color: @buffer_highlight; }\n",
+         .badge-highlight { background-color: @buffer_highlight; }\n\
+         .badge-call { color: @member_voice; }\n",
     );
 
     css

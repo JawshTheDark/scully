@@ -438,7 +438,13 @@ impl App {
                 let events = self.store.borrow_mut().apply_frame(*frame);
                 // Publish the cursor for the socket task's next reconnect.
                 self.cursor.store(self.store.borrow().cursor(), Ordering::Relaxed);
+                let burst_done = events.iter().any(|e| matches!(e, StoreEvent::BacklogComplete));
                 self.notify(&events);
+                // The connect burst is done and networks are known — snapshot
+                // active-call presence (the frame only carries deltas after this).
+                if burst_done {
+                    self.hydrate_call_presence();
+                }
             }
             ClientEvent::Undecodable { raw, error } => {
                 tracing::warn!(%error, %raw, "dropping a frame this client cannot parse");
@@ -600,7 +606,9 @@ impl App {
         let Some(network_id) = key.network_id else { return };
         let target = self.wire_target(&key);
         let app = self.clone();
-        let announce_target = target.clone();
+        // Presence is announced by the server (LiveKit webhooks → `call-presence`
+        // frame, Lurker #680), so the client sends no announcement itself —
+        // joining the room is enough for peers to see the count tick up.
         self.spawn_async(
             async move { rest.voice_token(network_id, &target).await },
             move |result| match result {
@@ -609,24 +617,44 @@ impl App {
                     vt.url,
                     vt.token,
                 ) {
-                    Ok(call) => {
-                        let (ctcp_type, args) = crate::voicesig::announce(
-                            &crate::voicesig::CallSignal::Start { room: vt.room },
-                        );
-                        app.send(ClientVerb::Ctcp {
-                            network_id,
-                            target: announce_target.clone(),
-                            ctcp_type,
-                            args,
-                            issuing_target: announce_target,
-                        });
-                        crate::callwindow::open(&app, call, &title);
-                    }
+                    Ok(call) => crate::callwindow::open(&app, call, &title),
                     Err(e) => eprintln!("[voice] could not start call: {e}"),
                 },
+                // e.g. 403 when a channel's call policy requires op/voice to join.
                 Err(e) => eprintln!("[voice] token request failed: {e}"),
             },
         );
+    }
+
+    /// Fetch active-call presence for every known network and feed it to the
+    /// store, so "call active (N)" badges appear even for calls that started
+    /// while we were offline. Called on each connect burst (`backlog-complete`);
+    /// the live `call-presence` frame handles deltas thereafter (Lurker #680).
+    fn hydrate_call_presence(self: &AppRef) {
+        if !self.voice_enabled.get() {
+            return;
+        }
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        let ids: Vec<i64> = self.store.borrow().networks.keys().copied().collect();
+        for id in ids {
+            let rest = rest.clone();
+            let app = self.clone();
+            self.spawn_async(
+                async move { rest.voice_presence(id).await },
+                move |res| {
+                    if let Ok(calls) = res {
+                        let pairs: Vec<(String, u32)> =
+                            calls.into_iter().map(|c| (c.target, c.count)).collect();
+                        let changed = app.store.borrow_mut().hydrate_call_presence(id, &pairs);
+                        let evs: Vec<StoreEvent> =
+                            changed.into_iter().map(StoreEvent::CallPresenceChanged).collect();
+                        if !evs.is_empty() {
+                            app.notify(&evs);
+                        }
+                    }
+                },
+            );
+        }
     }
 
     /// Explicit user intent to open a buffer — the one place `open-buffer` is

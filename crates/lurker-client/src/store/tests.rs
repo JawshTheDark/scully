@@ -719,3 +719,48 @@ fn dedupe_survives_eviction_of_the_row_being_replayed() {
     apply(&mut store, msg(1, "#chat", "someone", "x"));
     assert_eq!(store.buffer(&key("#chat")).unwrap().events.len(), before);
 }
+
+#[test]
+fn call_presence_frame_tracks_counts_and_emits_on_change() {
+    // Lurker #680: the call-presence frame drives a per-buffer participant count.
+    let mut store = Store::new();
+
+    let evs = apply(
+        &mut store,
+        json!({"kind": "call-presence", "networkId": 1, "target": "#dev", "count": 2}),
+    );
+    assert_eq!(store.call_count(&key("#dev")), 2);
+    assert!(evs
+        .iter()
+        .any(|e| matches!(e, StoreEvent::CallPresenceChanged(k) if *k == key("#dev"))));
+
+    // Re-sending the same count must not emit — no spurious repaints.
+    let evs = apply(
+        &mut store,
+        json!({"kind": "call-presence", "networkId": 1, "target": "#dev", "count": 2}),
+    );
+    assert!(evs.is_empty(), "unchanged count re-emitted");
+
+    // count 0 means the call ended: the entry clears and a change fires.
+    let evs = apply(
+        &mut store,
+        json!({"kind": "call-presence", "networkId": 1, "target": "#dev", "count": 0}),
+    );
+    assert_eq!(store.call_count(&key("#dev")), 0);
+    assert!(evs.iter().any(|e| matches!(e, StoreEvent::CallPresenceChanged(_))));
+}
+
+#[test]
+fn hydrate_call_presence_replaces_stale_entries_with_the_snapshot() {
+    // On reconnect the REST snapshot is authoritative: a call that ended while
+    // we were offline must clear, not linger, since the frame only sends deltas.
+    let mut store = Store::new();
+    apply(&mut store, json!({"kind":"call-presence","networkId":1,"target":"#dev","count":1}));
+    apply(&mut store, json!({"kind":"call-presence","networkId":1,"target":"#ops","count":4}));
+
+    let changed = store.hydrate_call_presence(1, &[("#dev".to_string(), 3)]);
+    assert_eq!(store.call_count(&key("#dev")), 3, "updated to snapshot count");
+    assert_eq!(store.call_count(&key("#ops")), 0, "stale call cleared");
+    assert!(changed.contains(&key("#dev")));
+    assert!(changed.contains(&key("#ops")));
+}

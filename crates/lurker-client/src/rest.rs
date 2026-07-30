@@ -162,6 +162,20 @@ pub struct VoiceToken {
     pub token: String,
 }
 
+/// One active call in the `GET /api/voice/presence` snapshot.
+#[derive(Clone, Debug, Deserialize)]
+pub struct VoiceCall {
+    pub target: String,
+    #[serde(default)]
+    pub count: u32,
+}
+
+#[derive(Deserialize)]
+struct VoicePresenceEnvelope {
+    #[serde(default)]
+    calls: Vec<VoiceCall>,
+}
+
 #[derive(Deserialize)]
 struct BootstrapEnvelope {
     #[serde(default)]
@@ -370,6 +384,17 @@ impl Rest {
             .send()
             .await?;
         Ok(Self::check(resp).await?.json().await?)
+    }
+
+    /// `GET /api/voice/presence?networkId=` — snapshot of which channels on a
+    /// network currently have an active voice call, for hydrating presence on
+    /// (re)connect (Lurker #680). The live `call-presence` frame carries deltas
+    /// only, so a client attaching mid-call needs this to see the badge.
+    pub async fn voice_presence(&self, network_id: i64) -> Result<Vec<VoiceCall>> {
+        let url = self.url(&format!("api/voice/presence?networkId={network_id}"))?;
+        let resp = self.authed(self.http.get(url)).send().await?;
+        let env: VoicePresenceEnvelope = Self::check(resp).await?.json().await?;
+        Ok(env.calls)
     }
 
     /// `POST /api/auth/logout` — deletes this session row (per-device revoke on

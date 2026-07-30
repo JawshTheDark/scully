@@ -236,23 +236,7 @@ pub fn line_for(event: &MessageEvent, strftime: &str, palette_len: usize) -> Opt
             };
             (pad_nick("--"), text, kind, false)
         }
-        EventType::Ctcp => {
-            // A LURKER-CALL CTCP is a call announcement from a peer's Scully —
-            // render it as a human invitation to /call, not raw CTCP noise.
-            match crate::voicesig::parse_line(&text) {
-                Some(crate::voicesig::CallSignal::Start { .. }) => (
-                    pad_nick("--"),
-                    format!("📞 {nick} started a voice call — type /call to join"),
-                    LineKind::Topic,
-                    false,
-                ),
-                Some(crate::voicesig::CallSignal::End { .. }) => {
-                    (pad_nick("--"), format!("📞 {nick} ended the voice call"), LineKind::Server, false)
-                }
-                None => (pad_nick("--"), text, LineKind::Server, false),
-            }
-        }
-        EventType::E2e => (pad_nick("--"), text, LineKind::Server, false),
+        EventType::Ctcp | EventType::E2e => (pad_nick("--"), text, LineKind::Server, false),
         // Pure state signals render nothing.
         _ => return None,
     };

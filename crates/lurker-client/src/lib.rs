@@ -16,6 +16,6 @@ pub mod socket;
 pub mod store;
 
 pub use error::{ConnState, Error, Result};
-pub use rest::{Edition, NetworkRow, Rest, ServerConfig, SettingOption, SettingsBootstrap, TokenResponse, UploadResponse, VoiceToken};
+pub use rest::{Edition, NetworkRow, Rest, ServerConfig, SettingOption, SettingsBootstrap, TokenResponse, UploadResponse, VoiceCall, VoiceToken};
 pub use socket::{ClientEvent, Socket, SocketConfig};
 pub use store::{Buffer, Network, Store, StoreEvent};

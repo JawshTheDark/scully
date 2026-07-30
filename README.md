@@ -54,11 +54,13 @@ a buffer quick-switcher (Ctrl+K), and ~60 slash commands.
 
 Also, behind a build flag: **native voice calls** (`--features voice`). A
 self-hosted LiveKit SFU handles the media; Lurker mints room-scoped tokens
-(`/api/voice/token`, gated on network ownership and channel membership); Scully
-joins over libwebrtc — a native media engine, **not** a webview — with the
-microphone and speakers driven by `cpal`. A call is announced in-channel over
-CTCP so other Scully clients can `/call` in. This is beyond Lurker's own feature
-set, not a port of it.
+(`/api/voice/token`); Scully joins over libwebrtc — a native media engine,
+**not** a webview — with the microphone and speakers driven by `cpal`. Active
+calls surface as a "📞 N" badge on the buffer list, fed by Lurker's server-side
+`call-presence` frame (Lurker #680) and a per-network snapshot on connect, so
+you see a call whether or not you're in it; the 📞 button or `/call` joins.
+Presence being *always on* while joining is feature-gated means a stock build
+still shows call badges without linking libwebrtc.
 
 ## Parity with Lurker, deliberately not a clone
 
