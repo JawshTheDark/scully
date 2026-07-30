@@ -9,6 +9,7 @@
 
 mod app;
 mod buffermenu;
+mod callmod;
 mod channeldialog;
 mod commands;
 mod credentials;

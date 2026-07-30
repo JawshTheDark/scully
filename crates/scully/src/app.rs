@@ -657,6 +657,65 @@ impl App {
         }
     }
 
+    /// Mute or remove a participant from the call in `key` (Lurker #680).
+    /// `action` is `"mute"` or `"remove"`; `identity` is the participant's IRC
+    /// nick. Server-gated on op status — `report` surfaces the outcome.
+    pub fn moderate_call(
+        self: &AppRef,
+        key: &BufferKey,
+        identity: String,
+        action: &'static str,
+        report: impl Fn(Result<(), String>) + 'static,
+    ) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        let Some(network_id) = key.network_id else { return };
+        let target = self.wire_target(key);
+        self.spawn_async(
+            async move { rest.voice_moderate(network_id, &target, &identity, action).await },
+            move |res| report(res.map_err(|e| e.to_string())),
+        );
+    }
+
+    /// Read a channel's call join policy, then hand it to `done`.
+    pub fn fetch_call_policy(
+        self: &AppRef,
+        key: &BufferKey,
+        done: impl Fn(Result<crate::callmod::MinJoin, String>) + 'static,
+    ) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        let Some(network_id) = key.network_id else { return };
+        let target = self.wire_target(key);
+        self.spawn_async(
+            async move { rest.voice_policy(network_id, &target).await },
+            move |res| {
+                done(res
+                    .map(|s| crate::callmod::MinJoin::from_wire(&s))
+                    .map_err(|e| e.to_string()))
+            },
+        );
+    }
+
+    /// Set a channel's call join policy. Ops only, server-enforced.
+    pub fn set_call_policy(
+        self: &AppRef,
+        key: &BufferKey,
+        mode: crate::callmod::MinJoin,
+        done: impl Fn(Result<crate::callmod::MinJoin, String>) + 'static,
+    ) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        let Some(network_id) = key.network_id else { return };
+        let target = self.wire_target(key);
+        let wire = mode.to_wire();
+        self.spawn_async(
+            async move { rest.set_voice_policy(network_id, &target, wire).await },
+            move |res| {
+                done(res
+                    .map(|s| crate::callmod::MinJoin::from_wire(&s))
+                    .map_err(|e| e.to_string()))
+            },
+        );
+    }
+
     /// Explicit user intent to open a buffer — the one place `open-buffer` is
     /// correct, because it is a write with side effects on every device.
     pub fn open_buffer(self: &AppRef, key: &BufferKey) {

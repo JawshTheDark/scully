@@ -1868,6 +1868,27 @@ impl ChatWindow {
         let rank = self.my_rank();
         let model = crate::nickmenu::menu_model(rank);
 
+        // Call moderation, appended only when there IS a call in this channel
+        // and the clicker can moderate it (Lurker #680). Hidden otherwise, so
+        // the menu never offers an action that can only 403.
+        let call_live = self
+            .active
+            .borrow()
+            .as_ref()
+            .is_some_and(|k| self.app.store.borrow().call_count(k) > 0);
+        if call_live && crate::callmod::can_moderate_call(rank) {
+            let call = gio::Menu::new();
+            call.append_item(&gio::MenuItem::new(
+                Some("Mute in call"),
+                Some("nick.cmd::call-mute"),
+            ));
+            call.append_item(&gio::MenuItem::new(
+                Some("Remove from call"),
+                Some("nick.cmd::call-remove"),
+            ));
+            model.append_section(Some("Voice call"), &call);
+        }
+
         let this = self.clone();
         let group = gio::SimpleActionGroup::new();
         let action = gio::SimpleAction::new("cmd", Some(glib::VariantTy::STRING));
@@ -2056,6 +2077,22 @@ impl ChatWindow {
         }
         let Some(key) = self.active.borrow().clone() else { return };
         let Some(network_id) = key.network_id else { return };
+
+        // Call moderation isn't an IRC verb — it's a REST action against the
+        // SFU (Lurker #680), so it is handled here rather than in nickmenu's
+        // pure verb table. The menu only offers these when a call is live and
+        // the clicker is halfop+; the server re-checks regardless.
+        if id == "call-mute" || id == "call-remove" {
+            let action = if id == "call-mute" { "mute" } else { "remove" };
+            let status = self.status_label.clone();
+            let who = nick.clone();
+            self.app.moderate_call(&key, nick, action, move |res| match res {
+                Ok(()) => status.set_text(&format!("{action}: {who}")),
+                Err(e) => status.set_text(&format!("call moderation failed — {e}")),
+            });
+            return;
+        }
+
         let Some(cmd) = crate::nickmenu::Cmd::from_id(id) else { return };
 
         // Query changes window state, so it lives here rather than in the

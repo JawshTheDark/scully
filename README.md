@@ -60,7 +60,10 @@ calls surface as a "📞 N" badge on the buffer list, fed by Lurker's server-sid
 `call-presence` frame (Lurker #680) and a per-network snapshot on connect, so
 you see a call whether or not you're in it; the 📞 button or `/call` joins.
 Presence being *always on* while joining is feature-gated means a stock build
-still shows call badges without linking libwebrtc.
+still shows call badges without linking libwebrtc. Channel operators get call
+moderation (mute / remove, from the nicklist menu) and a per-channel join
+policy in the channel-control dialog; both mirror the server's own op rules, so
+the controls are hidden rather than offered-then-refused.
 
 ## Parity with Lurker, deliberately not a clone
 

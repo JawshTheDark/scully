@@ -162,6 +162,31 @@ pub struct VoiceToken {
     pub token: String,
 }
 
+/// Reply to `GET`/`PUT /api/voice/policy`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoicePolicy {
+    /// `none` | `voice` | `halfop` | `op`. Unknown values are the server's
+    /// problem — it normalizes to `none`.
+    #[serde(default)]
+    pub min_join_mode: String,
+}
+
+/// Percent-encode a query-string value. Channel targets start with `#`, which
+/// would otherwise be read as a URL fragment and silently truncate the target.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// One active call in the `GET /api/voice/presence` snapshot.
 #[derive(Clone, Debug, Deserialize)]
 pub struct VoiceCall {
@@ -397,6 +422,63 @@ impl Rest {
         Ok(env.calls)
     }
 
+    /// `POST /api/voice/moderate` — mute or remove a participant from a call
+    /// (Lurker #680). Server-gated on channel op status (`q`/`a`/`o`/`h`); the
+    /// client gates the *menu* on the same rule so a rejected action is rare.
+    /// `identity` is the participant's LiveKit identity — their IRC nick.
+    pub async fn voice_moderate(
+        &self,
+        network_id: i64,
+        target: &str,
+        identity: &str,
+        action: &str,
+    ) -> Result<()> {
+        let resp = self
+            .authed(self.http.post(self.url("api/voice/moderate")?))
+            .json(&serde_json::json!({
+                "networkId": network_id,
+                "target": target,
+                "identity": identity,
+                "action": action,
+            }))
+            .send()
+            .await?;
+        Self::check(resp).await?;
+        Ok(())
+    }
+
+    /// `GET /api/voice/policy` — the minimum channel status required to join
+    /// this channel's call (`none`/`voice`/`halfop`/`op`). Readable by any member.
+    pub async fn voice_policy(&self, network_id: i64, target: &str) -> Result<String> {
+        let url = self.url(&format!(
+            "api/voice/policy?networkId={network_id}&target={}",
+            urlencode(target)
+        ))?;
+        let resp = self.authed(self.http.get(url)).send().await?;
+        let env: VoicePolicy = Self::check(resp).await?.json().await?;
+        Ok(env.min_join_mode)
+    }
+
+    /// `PUT /api/voice/policy` — set that minimum. Ops only (`q`/`a`/`o`).
+    pub async fn set_voice_policy(
+        &self,
+        network_id: i64,
+        target: &str,
+        min_join_mode: &str,
+    ) -> Result<String> {
+        let resp = self
+            .authed(self.http.put(self.url("api/voice/policy")?))
+            .json(&serde_json::json!({
+                "networkId": network_id,
+                "target": target,
+                "minJoinMode": min_join_mode,
+            }))
+            .send()
+            .await?;
+        let env: VoicePolicy = Self::check(resp).await?.json().await?;
+        Ok(env.min_join_mode)
+    }
+
     /// `POST /api/auth/logout` — deletes this session row (per-device revoke on
     /// standalone).
     pub async fn logout(&self) -> Result<()> {
@@ -409,6 +491,15 @@ impl Rest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urlencode_escapes_the_channel_sigil() {
+        // A bare `#` in a query string is a fragment delimiter — unescaped,
+        // `?target=#dev` sends an EMPTY target and the request 400s.
+        assert_eq!(urlencode("#dev"), "%23dev");
+        assert_eq!(urlencode("#foo[bar]"), "%23foo%5Bbar%5D");
+        assert_eq!(urlencode("plain-nick_1.x~"), "plain-nick_1.x~", "unreserved kept as-is");
+    }
 
     #[test]
     fn parses_camel_case_config() {

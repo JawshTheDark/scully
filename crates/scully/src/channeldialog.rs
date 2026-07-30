@@ -345,6 +345,95 @@ pub fn open(app: &AppRef, key: &BufferKey) {
     outer.append(&list_status);
     outer.append(&list_scroll);
 
+    // ── Voice-call join policy (Lurker #680) ──
+    // Only rendered when the server offers voice at all. Reading the policy is
+    // open to any member; changing it is ops-only, mirrored from the server so
+    // a non-op sees the current setting but cannot edit it.
+    if app.voice_enabled.get() {
+        let my_rank = {
+            let store = app.store.borrow();
+            let my_nick = store.networks.get(&network_id).and_then(|n| n.nick.clone());
+            my_nick
+                .and_then(|nick| {
+                    store
+                        .buffer(key)
+                        .and_then(|b| b.members.get(&lurker_proto::fold(&nick)))
+                        .map(|m| crate::nickmenu::Rank::from_mode(m.modes.first().map(String::as_str)))
+                })
+                .unwrap_or(crate::nickmenu::Rank::None)
+        };
+        let may_set = crate::callmod::can_set_policy(my_rank);
+
+        let call_heading = gtk::Label::builder()
+            .xalign(0.0)
+            .label("Voice call — who may join")
+            .css_classes(["chanctl-heading"])
+            .build();
+        outer.append(&call_heading);
+
+        let call_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let labels: Vec<&str> = crate::callmod::MinJoin::ALL.iter().map(|m| m.label()).collect();
+        let policy_drop = gtk::DropDown::from_strings(&labels);
+        policy_drop.set_hexpand(true);
+        policy_drop.set_sensitive(false); // until the current value loads
+        let policy_status = gtk::Label::builder()
+            .xalign(0.0)
+            .label(if may_set { "loading…" } else { "loading… (operators may change this)" })
+            .css_classes(["chanctl-current"])
+            .build();
+        call_row.append(&policy_drop);
+        outer.append(&call_row);
+        outer.append(&policy_status);
+
+        // Load the current policy, then arm the control. `applying` suppresses
+        // the change handler while we set the initial selection, so loading a
+        // value never writes it straight back to the server.
+        let applying = Rc::new(std::cell::Cell::new(true));
+        {
+            let drop_w = policy_drop.clone();
+            let status = policy_status.clone();
+            let applying = applying.clone();
+            app.fetch_call_policy(key, move |res| match res {
+                Ok(mode) => {
+                    let idx = crate::callmod::MinJoin::ALL
+                        .iter()
+                        .position(|m| *m == mode)
+                        .unwrap_or(0) as u32;
+                    applying.set(true);
+                    drop_w.set_selected(idx);
+                    applying.set(false);
+                    drop_w.set_sensitive(may_set);
+                    status.set_text(if may_set {
+                        "operators can change this"
+                    } else {
+                        "only operators can change this"
+                    });
+                }
+                Err(e) => status.set_text(&format!("could not read policy — {e}")),
+            });
+        }
+
+        if may_set {
+            let app = app.clone();
+            let key = key.clone();
+            let status = policy_status.clone();
+            policy_drop.connect_selected_notify(move |d| {
+                if applying.get() {
+                    return;
+                }
+                let Some(mode) = crate::callmod::MinJoin::ALL.get(d.selected() as usize).copied()
+                else {
+                    return;
+                };
+                let status = status.clone();
+                app.set_call_policy(&key, mode, move |res| match res {
+                    Ok(applied) => status.set_text(&format!("join policy: {}", applied.label())),
+                    Err(e) => status.set_text(&format!("could not set policy — {e}")),
+                });
+            });
+        }
+    }
+
     // ── Footer: current mode string + refresh ──
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let current = gtk::Label::builder()
