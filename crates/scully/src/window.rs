@@ -83,6 +83,10 @@ pub struct ChatWindow {
     /// The live popover, kept only so a previous one can be dismissed before a
     /// new right-click opens another.
     nick_menu: RefCell<Option<gtk::PopoverMenu>>,
+    /// The buffer-list context menu popover, and the buffer it was opened on.
+    /// Same lifecycle as `nick_menu`: kept alive, replaced on each right-click.
+    buffer_menu: RefCell<Option<gtk::PopoverMenu>>,
+    menu_buffer: RefCell<Option<BufferKey>>,
     /// An older page is in flight; don't ask for another.
     paging: Cell<bool>,
     /// The unread divider position, pinned when the buffer became active
@@ -311,6 +315,8 @@ impl ChatWindow {
             member_nicks: RefCell::new(Vec::new()),
             menu_nick: RefCell::new(String::new()),
             nick_menu: RefCell::new(None),
+            buffer_menu: RefCell::new(None),
+            menu_buffer: RefCell::new(None),
             divider_after: Cell::new(None),
             history_pos: Cell::new(None),
             history_stash: RefCell::new(String::new()),
@@ -647,6 +653,19 @@ impl ChatWindow {
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
         self.buffer_list.add_controller(middle);
+
+        // Right-click a buffer row: context menu (pop out, mark read, pin,
+        // leave/rejoin, close), tailored to the buffer's kind and state.
+        let this = self.clone();
+        let buf_right = gtk::GestureClick::builder().button(3).build();
+        buf_right.connect_pressed(move |gesture, _, x, y| {
+            let Some(row) = this.buffer_list.row_at_y(y as i32) else { return };
+            let idx = row.index() as usize;
+            let Some(key) = this.rows.borrow().get(idx).cloned() else { return };
+            this.open_buffer_menu(key, x as i32, y as i32);
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        self.buffer_list.add_controller(buf_right);
 
         let this = self.clone();
         self.entry.connect_activate(move |entry| {
@@ -1855,6 +1874,98 @@ impl ChatWindow {
         let _ = nick;
         popover.popup();
         *self.nick_menu.borrow_mut() = Some(popover);
+    }
+
+    /// Open the buffer-list context menu for `key` at (x, y) in the list. The
+    /// item set is tailored to the buffer's kind and state (see buffermenu.rs);
+    /// the action group is attached to the popover so every item resolves.
+    fn open_buffer_menu(self: &Rc<Self>, key: BufferKey, x: i32, y: i32) {
+        if let Some(old) = self.buffer_menu.borrow_mut().take() {
+            old.unparent();
+        }
+
+        let (in_store, joined, pinned) = {
+            let store = self.app.store.borrow();
+            match store.buffer(&key) {
+                Some(b) => (true, b.joined, b.pinned),
+                None => (false, false, false),
+            }
+        };
+        let cx = crate::buffermenu::BufContext {
+            is_channel: key.is_channel(),
+            is_dm: key.is_dm(),
+            in_store,
+            joined,
+            pinned,
+        };
+        let model = crate::buffermenu::menu_model(&cx);
+
+        let this = self.clone();
+        let group = gio::SimpleActionGroup::new();
+        let action = gio::SimpleAction::new("cmd", Some(glib::VariantTy::STRING));
+        action.connect_activate(move |_, param| {
+            if let Some(id) = param.and_then(|p| p.get::<String>()) {
+                this.run_buffer_command(&id);
+            }
+        });
+        group.add_action(&action);
+
+        let popover = gtk::PopoverMenu::from_model(Some(&model));
+        popover.insert_action_group("buf", Some(&group));
+        popover.set_parent(&self.buffer_list);
+        popover.set_has_arrow(false);
+        popover.set_halign(gtk::Align::Start);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
+
+        *self.menu_buffer.borrow_mut() = Some(key);
+        popover.popup();
+        *self.buffer_menu.borrow_mut() = Some(popover);
+    }
+
+    /// Dispatch a buffer-menu id against the buffer the menu was opened on.
+    fn run_buffer_command(self: &Rc<Self>, id: &str) {
+        debug_assert!(crate::buffermenu::id_is_known(id), "unknown buffer-menu id {id}");
+        let Some(key) = self.menu_buffer.borrow().clone() else { return };
+        let target = self.app.wire_target(&key);
+        match id {
+            "popout" => {
+                let exists = self.app.store.borrow().buffer(&key).is_some();
+                if exists {
+                    crate::open_popout(&self.app, key);
+                }
+            }
+            "read" => {
+                let newest = self.app.store.borrow().buffer(&key).and_then(|b| b.newest_id);
+                if let Some(mid) = newest {
+                    self.app.mark_read(&key, mid);
+                }
+            }
+            "pin" => {
+                self.app.send(ClientVerb::PinBuffer { network_id: key.network_id, target });
+            }
+            "unpin" => {
+                self.app.send(ClientVerb::UnpinBuffer { network_id: key.network_id, target });
+            }
+            "part" => {
+                if let Some(net) = key.network_id {
+                    self.app.send(ClientVerb::Part { network_id: net, channel: target, reason: None });
+                }
+            }
+            "join" => {
+                if let Some(net) = key.network_id {
+                    self.app.store.borrow_mut().note_pending_join(key.clone());
+                    self.app.send(ClientVerb::Join { network_id: net, channel: target, key: None });
+                }
+            }
+            "close" => {
+                self.app.send(ClientVerb::CloseBuffer {
+                    network_id: key.network_id,
+                    target,
+                    reason: None,
+                });
+            }
+            _ => {}
+        }
     }
 
     /// Open message search. `everywhere` searches all conversations; otherwise

@@ -8,6 +8,7 @@
 // free), and the protocol work lives in `lurker-client` / `lurker-proto`.
 
 mod app;
+mod buffermenu;
 mod channeldialog;
 mod commands;
 mod credentials;
