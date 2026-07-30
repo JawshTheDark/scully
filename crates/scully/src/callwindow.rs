@@ -112,25 +112,42 @@ pub fn open(app: &AppRef, call: Call, title: &str) {
     // before we hand it to the window; the future runs on the glib main loop.
     let events = call.borrow().as_ref().unwrap().events.clone();
     let roster: Rc<RefCell<BTreeSet<String>>> = Rc::new(RefCell::new(BTreeSet::new()));
+    // Our own identity, so the list can show you as well as the other people —
+    // "who is in this call" has to include yourself to make sense.
+    let me: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    // Who is talking right now; kept so a join/leave redraw doesn't wipe it.
+    let speaking: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     {
         let status = status.clone();
         let participants = participants.clone();
         let roster = roster.clone();
+        let me = me.clone();
+        let speaking = speaking.clone();
         let window = window.clone();
         glib::spawn_future_local(async move {
+            let draw = |list: &gtk::ListBox| {
+                redraw_roster(list, &me.borrow(), &roster.borrow(), &speaking.borrow());
+            };
             while let Ok(ev) = events.recv().await {
                 match ev {
-                    CallEvent::Connected => status.set_text("Connected"),
+                    CallEvent::Connected { you, participants: already } => {
+                        status.set_text("Connected");
+                        *me.borrow_mut() = you;
+                        roster.borrow_mut().extend(already);
+                        draw(&participants);
+                    }
                     CallEvent::ParticipantJoined(id) => {
                         roster.borrow_mut().insert(id);
-                        redraw_roster(&participants, &roster.borrow(), &[]);
+                        draw(&participants);
                     }
                     CallEvent::ParticipantLeft(id) => {
                         roster.borrow_mut().remove(&id);
-                        redraw_roster(&participants, &roster.borrow(), &[]);
+                        speaking.borrow_mut().retain(|s| s != &id);
+                        draw(&participants);
                     }
                     CallEvent::Speaking(active) => {
-                        redraw_roster(&participants, &roster.borrow(), &active);
+                        *speaking.borrow_mut() = active;
+                        draw(&participants);
                     }
                     CallEvent::Ended(why) => {
                         status.set_text(&format!("Call ended — {why}"));
@@ -148,25 +165,46 @@ pub fn open(app: &AppRef, call: Call, title: &str) {
     window.present();
 }
 
-/// Rebuild the participant rows. `speaking` identities get a small marker so you
-/// can see who has the floor.
-fn redraw_roster(list: &gtk::ListBox, roster: &BTreeSet<String>, speaking: &[String]) {
+/// Rebuild the participant rows: you first (marked), then everyone else in
+/// name order. Whoever currently has the floor gets a speaker icon, so the list
+/// answers both "who is here" and "who is talking".
+fn redraw_roster(
+    list: &gtk::ListBox,
+    me: &str,
+    roster: &BTreeSet<String>,
+    speaking: &[String],
+) {
     while let Some(row) = list.first_child() {
         list.remove(&row);
     }
-    if roster.is_empty() {
-        let row = gtk::Label::builder()
-            .label("Just you so far…")
-            .xalign(0.0)
-            .css_classes(["dim-label"])
-            .build();
-        list.append(&row);
-        return;
+
+    let mut rows: Vec<(String, bool)> = Vec::with_capacity(roster.len() + 1);
+    if !me.is_empty() {
+        rows.push((format!("{me} (you)"), speaking.iter().any(|s| s == me)));
     }
     for id in roster {
-        let talking = speaking.iter().any(|s| s == id);
-        let label = if talking { format!("🔊 {id}") } else { format!("   {id}") };
-        let row = gtk::Label::builder().label(label).xalign(0.0).build();
-        list.append(&row);
+        // The local participant can also appear in the remote list on some
+        // servers; don't render them twice.
+        if id == me {
+            continue;
+        }
+        rows.push((id.clone(), speaking.iter().any(|s| s == id)));
+    }
+
+    if rows.is_empty() {
+        list.append(
+            &gtk::Label::builder()
+                .label("Connecting…")
+                .xalign(0.0)
+                .css_classes(["dim-label"])
+                .build(),
+        );
+        return;
+    }
+
+    for (name, talking) in rows {
+        // U+2007 (figure space) keeps non-speaking names aligned under the icon.
+        let label = if talking { format!("\u{1F50A} {name}") } else { format!("\u{2007}\u{2007} {name}") };
+        list.append(&gtk::Label::builder().label(label).xalign(0.0).build());
     }
 }

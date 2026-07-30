@@ -45,8 +45,11 @@ use livekit::{Room, RoomEvent, RoomOptions};
 /// LiveKit type, so the UI layer stays free of the SDK.
 #[derive(Clone, Debug)]
 pub enum CallEvent {
-    /// The room is joined; media is flowing.
-    Connected,
+    /// The room is joined; media is flowing. Carries your own identity and
+    /// everyone already in the room — `ParticipantConnected` only fires for
+    /// people who arrive *after* you, so without this snapshot a caller joining
+    /// an in-progress call would show an empty roster.
+    Connected { you: String, participants: Vec<String> },
     /// A remote participant joined (their identity — our IRC nick convention).
     ParticipantJoined(String),
     /// A remote participant left.
@@ -251,7 +254,12 @@ impl RoomTask {
             self.muted.clone(),
         ));
 
-        emit(CallEvent::Connected);
+        // Snapshot the room as we found it: our own identity, plus anyone
+        // already here. Events only cover changes from this point on.
+        emit(CallEvent::Connected {
+            you: room.local_participant().identity().0,
+            participants: room.remote_participants().keys().map(|k| k.0.clone()).collect(),
+        });
 
         // Event loop: translate RoomEvents, wire playback, honour hangup.
         loop {
