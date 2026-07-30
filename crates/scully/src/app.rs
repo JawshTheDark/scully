@@ -58,14 +58,7 @@ impl Default for DeviceSettings {
 
 impl DeviceSettings {
     fn path() -> std::path::PathBuf {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                    .join(".config")
-            })
-            .join("scully")
-            .join("device.json")
+        crate::paths::config_dir().join("device.json")
     }
 
     fn load() -> Self {

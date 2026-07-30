@@ -20,6 +20,7 @@ mod login;
 mod media;
 mod modelist;
 mod nickmenu;
+mod paths;
 mod settings;
 mod theme;
 #[cfg(feature = "voice")]

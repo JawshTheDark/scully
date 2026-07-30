@@ -48,12 +48,7 @@ impl Credentials {
     }
 
     fn file_path(&self) -> PathBuf {
-        let dir = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
-            })
-            .join("scully");
+        let dir = crate::paths::data_dir();
         let digest: String = self
             .account
             .bytes()
@@ -138,11 +133,5 @@ pub fn last_account() -> Option<(url::Url, String)> {
 }
 
 fn last_account_path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        })
-        .join("scully")
-        .join("last-account")
+    crate::paths::config_dir().join("last-account")
 }

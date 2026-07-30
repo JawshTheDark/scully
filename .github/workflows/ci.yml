@@ -1,0 +1,65 @@
+# Build and test Scully on all three desktop platforms.
+#
+# The point of this workflow is evidence: GTK4 is usually described as a Linux
+# toolkit, so whether the app actually builds and its tests pass on Windows and
+# macOS is a question worth answering with a run rather than an opinion.
+#
+# The `voice` feature is deliberately NOT built here. It pulls a prebuilt
+# libwebrtc through webrtc-sys — a large download and a clang toolchain — which
+# would dominate CI time and tell us nothing about the GTK question.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install GTK4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install GTK4
+        run: brew install gtk4 pkg-config
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
+  windows:
+    runs-on: windows-latest
+    # MSYS2/MINGW64 is the practical way to get GTK4 and its pkg-config data on
+    # Windows; the gnu Rust toolchain from the same repo keeps the ABI matched.
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk4
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-rust
+      - run: cargo build --workspace
+      - run: cargo test --workspace
