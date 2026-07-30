@@ -51,6 +51,12 @@ pub struct ChatWindow {
     btn_popout: gtk::Button,
     btn_read: gtk::Button,
     btn_settings: gtk::Button,
+    /// Voice-call affordances. Built unconditionally and shown only once the
+    /// server advertises `voiceEnabled`, which lands after the window is up.
+    btn_call: gtk::Button,
+    call_panel: gtk::Box,
+    call_status: gtk::Label,
+    call_button: gtk::Button,
     buffer_pane: gtk::Box,
     member_pane: gtk::Box,
     header: gtk::Box,
@@ -208,7 +214,11 @@ impl ChatWindow {
         let btn_popout = tool("⬈", "Pop this channel out into its own window");
         let btn_read = tool("✓", "Mark everything read");
         let btn_settings = tool("⚙", "Settings");
+        // Hidden until `voiceEnabled` arrives — see refresh_voice_ui.
+        let btn_call = tool("\u{1F4DE}", "Start or join a voice call (/call)");
+        btn_call.set_visible(false);
         header.append(&btn_search);
+        header.append(&btn_call);
         header.append(&btn_popout);
         header.append(&btn_read);
         header.append(&btn_settings);
@@ -255,8 +265,25 @@ impl ChatWindow {
             .child(&member_list)
             .vexpand(true)
             .build();
+        // Call panel: pinned above the nicklist, so a live call is visible
+        // wherever you are in the channel rather than hidden behind a toolbar
+        // button. Built always and hidden until the server says voice exists —
+        // the capability arrives asynchronously, long after this runs.
+        let call_status = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["call-status"])
+            .build();
+        let call_button = gtk::Button::builder().css_classes(["call-join"]).build();
+        let call_panel = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        call_panel.add_css_class("call-panel");
+        call_panel.append(&call_status);
+        call_panel.append(&call_button);
+        call_panel.set_visible(false);
+
         let right = gtk::Box::new(gtk::Orientation::Vertical, 0);
         right.add_css_class("sidebar");
+        right.append(&call_panel);
         right.append(&member_count);
         right.append(&member_scroll);
         let member_pane = right.clone();
@@ -299,6 +326,10 @@ impl ChatWindow {
             topic_label,
             status_label,
             member_count,
+            btn_call,
+            call_panel,
+            call_status,
+            call_button,
             btn_search,
             btn_popout,
             btn_read,
@@ -834,21 +865,13 @@ impl ChatWindow {
             crate::settings::SettingsWindow::open(&this.app);
         });
 
-        // Voice call button — only when built with the `voice` feature AND the
-        // server advertises voiceEnabled. Starts a call in the active buffer.
-        #[cfg(feature = "voice")]
-        if self.app.voice_enabled.get() {
-            let this = self.clone();
-            let btn_call = gtk::Button::builder()
-                .label("📞")
-                .tooltip_text("Start a voice call in this channel")
-                .build();
-            self.header.append(&btn_call);
-            btn_call.connect_clicked(move |_| {
-                let Some(key) = this.active.borrow().clone() else { return };
-                this.app.start_call(key, this.title_label.text().to_string());
-            });
-        }
+        // Voice call: toolbar button and the nicklist panel's join button both
+        // route through try_start_call, which reports precisely why nothing
+        // happened when it can't proceed.
+        let this = self.clone();
+        self.btn_call.connect_clicked(move |_| this.try_start_call());
+        let this = self.clone();
+        self.call_button.connect_clicked(move |_| this.try_start_call());
 
         // Window-level shortcuts: Ctrl+F search here, Ctrl+Shift+F search
         // everywhere, Ctrl+K quick switcher, Escape returns a detached buffer
@@ -1061,6 +1084,9 @@ impl ChatWindow {
         if remembers {
             self.rebuild_member_list();
         }
+        // Cheap, and depends on several of the above (presence, active buffer),
+        // so it runs once per batch rather than being threaded through each.
+        self.refresh_voice_ui();
         if status {
             self.update_status();
         }
@@ -1413,6 +1439,7 @@ impl ChatWindow {
         self.rebuild_member_list();
         self.update_status();
         self.rebuild_buffer_list();
+        self.refresh_voice_ui();
         if self.window.is_active() {
             self.mark_read_to_tail();
         }
@@ -1832,6 +1859,68 @@ impl ChatWindow {
         }
         drop(store);
         self.app.mark_read(&key, newest);
+    }
+
+    /// Show or hide the voice-call affordances and refresh their labels.
+    ///
+    /// Called whenever anything they depend on moves: the `voiceEnabled`
+    /// capability landing (asynchronously, after this window exists), the active
+    /// buffer changing, or a `call-presence` update. Cheap enough to run
+    /// unconditionally rather than tracking which input changed.
+    pub fn refresh_voice_ui(&self) {
+        let key = self.active.borrow().clone();
+        // Calls are per-conversation: channels and DMs, not server/system logs.
+        let callable = key.as_ref().is_some_and(|k| k.is_channel() || k.is_dm());
+        let show = self.app.voice_enabled.get() && callable;
+
+        self.btn_call.set_visible(show);
+        self.call_panel.set_visible(show);
+        if !show {
+            return;
+        }
+
+        let count = key.map(|k| self.app.store.borrow().call_count(&k)).unwrap_or(0);
+        if count > 0 {
+            self.call_status.set_text(&format!("\u{1F4DE} Call in progress — {count} in call"));
+            self.call_button.set_label("Join call");
+        } else {
+            self.call_status.set_text("No voice call here yet");
+            self.call_button.set_label("Start call");
+        }
+    }
+
+    /// Start or join a call in the active buffer, or say why we can't.
+    ///
+    /// The two ways this used to fail silently — a build without the `voice`
+    /// feature, and a server that doesn't offer voice — now each report
+    /// themselves in the status line instead of doing nothing (or, for `/call`,
+    /// falling through to the raw IRC fallback and returning "Unknown command").
+    fn try_start_call(self: &Rc<Self>) {
+        let Some(key) = self.active.borrow().clone() else {
+            self.status_label.set_text("no conversation is active");
+            return;
+        };
+        if !(key.is_channel() || key.is_dm()) {
+            self.status_label.set_text("voice calls only work in a channel or DM");
+            return;
+        }
+        if !self.app.voice_enabled.get() {
+            self.status_label
+                .set_text("this server does not have voice calls enabled");
+            return;
+        }
+        #[cfg(feature = "voice")]
+        {
+            self.status_label.set_text("connecting to the call…");
+            self.app.start_call(key, self.title_label.text().to_string());
+        }
+        #[cfg(not(feature = "voice"))]
+        {
+            let _ = key;
+            self.status_label.set_text(
+                "this build has no voice support — rebuild with: cargo run -p scully --features voice",
+            );
+        }
     }
 
     /// The clicker's own authority in the active channel — from their own
@@ -2659,11 +2748,12 @@ impl ChatWindow {
             ("clear", _) => {
                 Some(ClientVerb::ClearBuffer { network_id, target: self.app.wire_target(key) })
             }
-            // Start/join a voice call in this buffer. Local command: it mints a
-            // token and opens the call window rather than sending an IRC line.
-            #[cfg(feature = "voice")]
+            // Start/join a voice call in this buffer. Always recognised — even
+            // in a build without the `voice` feature — because falling through
+            // to the raw fallback sent "CALL" to the IRC server and came back
+            // "Unknown command", which explains nothing.
             ("call", _) => {
-                self.app.start_call(key.clone(), self.title_label.text().to_string());
+                self.try_start_call();
                 return true;
             }
             ("whois" | "wi", Some(net)) => {

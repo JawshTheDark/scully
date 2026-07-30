@@ -225,6 +225,26 @@ impl App {
     pub fn start_session(self: &AppRef, rest: Rest) {
         *self.rest.borrow_mut() = Some(rest.clone());
 
+        // Instance capabilities, on EVERY session start. Doing this only on the
+        // password-login path left `voiceEnabled` false forever for anyone
+        // resuming a stored token — which is the normal startup — so the call
+        // UI never appeared no matter how the server was configured.
+        {
+            let probe = rest.clone();
+            let app = self.clone();
+            self.spawn_async(
+                async move { probe.config().await },
+                move |result| {
+                    if let Ok(cfg) = result {
+                        app.voice_enabled.set(cfg.voice_enabled);
+                        // Windows are already built by now, so tell them to
+                        // re-evaluate what the capability unlocks.
+                        app.refresh_voice_ui();
+                    }
+                },
+            );
+        }
+
         let app = self.clone();
         self.spawn_async(
             async move { rest.networks().await },
@@ -247,6 +267,15 @@ impl App {
                 }
             },
         );
+    }
+
+    /// Re-evaluate voice-dependent UI in every open window. Called when the
+    /// `voiceEnabled` capability lands (asynchronously, after the windows are
+    /// already on screen).
+    pub fn refresh_voice_ui(self: &AppRef) {
+        for w in self.chat_windows.borrow().iter() {
+            w.refresh_voice_ui();
+        }
     }
 
     fn fetch_settings(self: &AppRef) {

@@ -170,16 +170,13 @@ impl LoginWindow {
                 if !config.is_compatible() {
                     return Err(lurker_client::Error::UpgradeRequired);
                 }
-                probe
-                    .login_token(&user, &pass)
-                    .await
-                    .map(|t| (t, user, config.voice_enabled))
+                // Instance capabilities (voiceEnabled &c.) are read by
+                // App::start_session, which runs on the resume path too — this
+                // config fetch is only the protocol-compatibility gate.
+                probe.login_token(&user, &pass).await.map(|t| (t, user))
             },
             move |result| match result {
-                Ok((token, user, voice)) => {
-                    this.app.voice_enabled.set(voice);
-                    this.on_token(rest, base, user, token.token);
-                }
+                Ok((token, user)) => this.on_token(rest, base, user, token.token),
                 Err(e) => {
                     let message = match e {
                         // Mint is password-only: a passkey-only account cannot

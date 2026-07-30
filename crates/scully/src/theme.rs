@@ -102,7 +102,9 @@ fn build_css(app: &AppRef) -> String {
          .member-voice { color: @member_voice; }\n\
          .badge { color: @buffer_unread; }\n\
          .badge-highlight { background-color: @buffer_highlight; }\n\
-         .badge-call { color: @member_voice; }\n",
+         .badge-call { color: @member_voice; }\n\
+         .call-panel { padding: 6px; }\n\
+         .call-status { color: @member_voice; font-size: 90%; }\n",
     );
 
     css
