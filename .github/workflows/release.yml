@@ -11,11 +11,14 @@
 # no system GTK to depend on there. macOS gets a .app inside a .dmg with its
 # libraries bundled.
 #
-# Voice IS built in. That costs a prebuilt libwebrtc download and a much larger
-# binary, but a call button you cannot press is not a feature — if the server
-# offers voice, the packaged client has to be able to answer. cpal reaches the
-# microphone through ALSA on Linux, so the Linux packages declare that runtime
-# too; without it the app installs and then fails the moment you open a call.
+# Voice is built in on Linux and macOS: a call button you cannot press is not a
+# feature, so if the server offers voice the packaged client has to answer. That
+# costs a prebuilt libwebrtc download and a much larger artefact, which is the
+# honest price. cpal reaches the microphone through ALSA on Linux, so those
+# packages declare it as a runtime dependency; without it the app installs
+# cleanly and then fails the moment someone opens a call.
+#
+# Windows is the exception, for a toolchain reason spelled out at that job.
 
 name: Release
 
@@ -209,8 +212,14 @@ jobs:
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-rust
             mingw-w64-x86_64-nsis
-            mingw-w64-x86_64-clang
-      - run: cargo build --release -p scully --features voice
+      # NOT --features voice on Windows. The prebuilt libwebrtc for Windows is
+      # built for MSVC, and webrtc-sys hands MSVC flags (/std:c++20, /EHsc) to
+      # whatever compiler it finds — which under MSYS2 is g++, and g++ rejects
+      # them. Building it would mean an MSVC Rust target, and GTK here comes
+      # from MinGW; the two toolchains cannot be mixed in one binary. Windows
+      # therefore ships everything except calls until GTK is sourced from
+      # gvsbuild under MSVC.
+      - run: cargo build --release -p scully
 
       - name: Resolve version
         id: v
