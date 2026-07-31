@@ -10,6 +10,34 @@
 // in `send` text. Anything not in this table still reaches the network via the
 // `raw` escape hatch, so an unknown command is passed through rather than
 // rejected — matching how a long-lived IRC client behaves.
+//
+// ── On IRCv3 ────────────────────────────────────────────────────────────────
+//
+// Scully talks to a bouncer, not to IRC, so most of IRCv3 is not its business.
+// The split:
+//
+//   * Typed by a person, so they live here: SETNAME, MONITOR, REDACT, METADATA.
+//     WHOX needs nothing — `/who #chan %tcuhnfar` already passes its arguments
+//     straight through.
+//   * Negotiated by Lurker on our behalf: CAP, SASL/AUTHENTICATE. These are
+//     deliberately NOT offered. Firing a raw `CAP LS` down a bouncer session
+//     would talk past Lurker's own capability state machine — it negotiated
+//     with the network and tracks what was agreed, and a second, unowned
+//     negotiation is a good way to desynchronise that for every device on the
+//     account.
+//   * Passive plumbing we only ever receive: message-tags, server-time, batch,
+//     echo-message, account-notify, away-notify, chghost, extended-join,
+//     multi-prefix, userhost-in-names, invite-notify, draft/multiline. There is
+//     no command to add; the event types already render them.
+//   * Owned by the Lurker protocol, which has typed verbs for them: CHATHISTORY
+//     (the `history` verb, §4.3) and MARKREAD (`mark-read`, §6). A raw form
+//     would bypass the store and desynchronise the resume cursor and unread
+//     counts, so those are excluded too.
+//
+// None of these can be gated on what the network actually supports: capability
+// negotiation happens between Lurker and the server, and the result is only
+// reported to us as system-log prose. An unsupported command therefore fails
+// with the server's own error, which is the honest outcome.
 
 /// Expand a command into a raw IRC line, given the current channel.
 ///
@@ -108,6 +136,78 @@ pub fn to_raw(cmd: &str, args: &str, channel: &str, prefix_modes: &str) -> Optio
         "names" => format!("NAMES {}", if args.is_empty() { channel } else { args }),
         "knock" => format!("KNOCK {}", if args.is_empty() { channel } else { args }),
 
+        // ── IRCv3 client-facing commands ──
+        //
+        // Only the ones a *person* types. The rest of IRCv3 is either
+        // negotiated by the bouncer (CAP, SASL) or passive plumbing the server
+        // pushes at us (batch, server-time, echo-message, away-notify…), and a
+        // couple are deliberately excluded further down — see the module notes.
+        //
+        // These need real parsing rather than the raw fallback, because that
+        // fallback just uppercases and forwards: `SETNAME John Smith` sets the
+        // realname to "John", silently discarding the rest. A trailing
+        // parameter has to be introduced with a colon.
+
+        // SETNAME (`setname`): change realname in place, no reconnect.
+        "setname" | "realname" => {
+            if args.is_empty() {
+                return None;
+            }
+            format!("SETNAME :{args}")
+        }
+
+        // MONITOR (`extended-monitor`): server-side presence watch list. The
+        // spec wants comma-separated targets, but people type spaces, so both
+        // are accepted and normalised.
+        "monitor" => {
+            let targets = || {
+                let list: Vec<&str> = rest_after_first.split([' ', ',']).filter(|s| !s.is_empty()).collect();
+                (!list.is_empty()).then(|| list.join(","))
+            };
+            match first.to_ascii_lowercase().as_str() {
+                "+" | "add" | "watch" => format!("MONITOR + {}", targets()?),
+                "-" | "del" | "rm" | "remove" | "unwatch" => format!("MONITOR - {}", targets()?),
+                "c" | "clear" => "MONITOR C".to_string(),
+                "l" | "list" => "MONITOR L".to_string(),
+                "s" | "status" => "MONITOR S".to_string(),
+                _ => return None,
+            }
+        }
+
+        // REDACT (`draft/message-redaction`): ask the server to retract a
+        // message by id. Targets the current buffer — the id is the part a
+        // person can't guess, so making them retype the channel too is noise.
+        "redact" => {
+            if first.is_empty() {
+                return None;
+            }
+            if rest_after_first.is_empty() {
+                format!("REDACT {channel} {first}")
+            } else {
+                format!("REDACT {channel} {first} :{rest_after_first}")
+            }
+        }
+
+        // METADATA (`draft/metadata`): `/metadata <target> set <key> <value…>`,
+        // or any other subcommand passed through. `*` means yourself.
+        "metadata" => {
+            let mut it = args.split_whitespace();
+            let target = it.next()?;
+            let sub = it.next()?.to_ascii_uppercase();
+            let key = it.next().unwrap_or("");
+            let value = args
+                .splitn(4, char::is_whitespace)
+                .nth(3)
+                .map(str::trim)
+                .unwrap_or("");
+            match (sub.as_str(), key.is_empty(), value.is_empty()) {
+                ("SET", false, false) => format!("METADATA {target} SET {key} :{value}"),
+                ("SET", false, true) => format!("METADATA {target} SET {key}"), // clears the key
+                (_, true, _) => format!("METADATA {target} {sub}"),
+                _ => format!("METADATA {target} {sub} {key}"),
+            }
+        }
+
         // ── Server and user queries ──
         "whowas" => format!("WHOWAS {args}"),
         "who" => format!("WHO {}", if args.is_empty() { channel } else { args }),
@@ -198,6 +298,8 @@ pub const KNOWN: &[&str] = &[
     "ison", "userhost", "motd", "lusers", "links", "map", "stats", "time", "version", "info",
     "oper", "ns", "cs", "ms", "os", "bs", "hs", "identify", "quote", "raw", "quit", "shrug",
     "tableflip", "unflip", "slap", "help", "call",
+    // IRCv3 client-facing commands (see the module notes on what is excluded).
+    "setname", "realname", "monitor", "redact", "metadata",
 ];
 
 #[cfg(test)]
@@ -212,6 +314,74 @@ mod tests {
     /// A network where `q` is a list mode (Libera/solanum): /quiet works.
     fn raw_libera(cmd: &str, args: &str) -> Option<String> {
         to_raw(cmd, args, "#chan", "ohv")
+    }
+
+    #[test]
+    fn setname_sends_the_whole_realname_as_a_trailing_parameter() {
+        // The bug the raw fallback had: it forwards "SETNAME John Smith", and
+        // the server reads only "John". A trailing parameter needs the colon.
+        assert_eq!(raw("setname", "John Smith").unwrap(), "SETNAME :John Smith");
+        assert_eq!(raw("realname", "just one").unwrap(), "SETNAME :just one");
+        assert!(raw("setname", "").is_none(), "no realname → not a command");
+    }
+
+    #[test]
+    fn monitor_accepts_spaces_or_commas_and_normalises_to_commas() {
+        // The spec is comma-separated; people type spaces.
+        assert_eq!(raw("monitor", "+ alice bob").unwrap(), "MONITOR + alice,bob");
+        assert_eq!(raw("monitor", "add alice,bob").unwrap(), "MONITOR + alice,bob");
+        assert_eq!(raw("monitor", "- alice").unwrap(), "MONITOR - alice");
+        assert_eq!(raw("monitor", "remove alice bob").unwrap(), "MONITOR - alice,bob");
+    }
+
+    #[test]
+    fn monitor_bare_subcommands_take_no_targets() {
+        assert_eq!(raw("monitor", "list").unwrap(), "MONITOR L");
+        assert_eq!(raw("monitor", "l").unwrap(), "MONITOR L");
+        assert_eq!(raw("monitor", "clear").unwrap(), "MONITOR C");
+        assert_eq!(raw("monitor", "status").unwrap(), "MONITOR S");
+        // A watch/unwatch with nothing to watch is not a command.
+        assert!(raw("monitor", "+").is_none());
+        assert!(raw("monitor", "nonsense").is_none());
+    }
+
+    #[test]
+    fn redact_targets_the_current_buffer_and_quotes_its_reason() {
+        assert_eq!(raw("redact", "abc123").unwrap(), "REDACT #chan abc123");
+        assert_eq!(
+            raw("redact", "abc123 posted in error").unwrap(),
+            "REDACT #chan abc123 :posted in error"
+        );
+        assert!(raw("redact", "").is_none());
+    }
+
+    #[test]
+    fn metadata_quotes_a_multi_word_value_and_passes_other_subcommands_through() {
+        assert_eq!(
+            raw("metadata", "* set avatar https://x/y.png").unwrap(),
+            "METADATA * SET avatar :https://x/y.png"
+        );
+        assert_eq!(
+            raw("metadata", "* set status away for lunch").unwrap(),
+            "METADATA * SET status :away for lunch"
+        );
+        // SET with no value is the documented way to clear a key.
+        assert_eq!(raw("metadata", "* set avatar").unwrap(), "METADATA * SET avatar");
+        assert_eq!(raw("metadata", "* list").unwrap(), "METADATA * LIST");
+        assert_eq!(raw("metadata", "#chan get url").unwrap(), "METADATA #chan GET url");
+        assert!(raw("metadata", "*").is_none(), "a target alone is not a command");
+    }
+
+    #[test]
+    fn bouncer_owned_ircv3_verbs_are_not_claimed_here() {
+        // CAP/AUTHENTICATE belong to Lurker's own negotiation, and
+        // CHATHISTORY/MARKREAD have typed Lurker verbs that keep the store and
+        // resume cursor consistent. This table must not translate them — if it
+        // ever starts, that is a silent desync, so pin it.
+        for cmd in ["cap", "authenticate", "chathistory", "markread"] {
+            assert!(raw(cmd, "whatever").is_none(), "{cmd} must not be owned by to_raw");
+            assert!(!KNOWN.contains(&cmd), "{cmd} must not be offered in completion");
+        }
     }
 
     #[test]
