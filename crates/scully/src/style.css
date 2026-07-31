@@ -467,3 +467,29 @@ row.buffer-row.dcc label {
   font-size: 90%;
   font-style: italic;
 }
+
+/* ── In-window media lightbox ─────────────────────────────────────────── */
+
+/* Dim the conversation behind the media rather than opening a separate window
+   that the compositor places wherever it likes. Clicking the scrim dismisses. */
+.media-scrim {
+  background-color: rgba(20, 19, 21, 0.88);
+  padding: 24px;
+}
+
+.media-body {
+  background-color: @bg;
+  border: 1px solid @border;
+  border-radius: 3px;
+  padding: 10px;
+}
+
+.media-caption {
+  color: @fg_muted;
+  font-size: 90%;
+}
+
+/* Channel browser rows: name in the accent so it scans as a joinable thing. */
+.chanlist-name {
+  color: @accent;
+}

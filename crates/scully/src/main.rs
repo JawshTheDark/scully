@@ -11,6 +11,7 @@ mod app;
 mod attention;
 mod buffermenu;
 mod callmod;
+mod chanlist;
 mod channeldialog;
 mod commands;
 mod credentials;

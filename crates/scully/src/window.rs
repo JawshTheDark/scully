@@ -58,6 +58,9 @@ pub struct ChatWindow {
     call_panel: gtk::Box,
     call_status: gtk::Label,
     call_button: gtk::Button,
+    overlay: gtk::Overlay,
+    /// The lightbox currently over the conversation, if any.
+    media_overlay: RefCell<Option<gtk::Box>>,
     buffer_pane: gtk::Box,
     member_pane: gtk::Box,
     header: gtk::Box,
@@ -339,7 +342,12 @@ impl ChatWindow {
             // widening — which clipped the left edge off every row in the list.
             .shrink_start_child(false)
             .build();
-        window.set_child(Some(&outer));
+        // The root is an Overlay so media can be shown *inside* this window —
+        // a lightbox over the conversation rather than a separate window that
+        // lands wherever the compositor decides.
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&outer));
+        window.set_child(Some(&overlay));
 
         let this = Rc::new(ChatWindow {
             app: app.clone(),
@@ -366,6 +374,8 @@ impl ChatWindow {
             btn_popout,
             btn_read,
             btn_settings,
+            overlay,
+            media_overlay: RefCell::new(None),
             buffer_pane,
             member_pane,
             header: header_box,
@@ -969,7 +979,11 @@ impl ChatWindow {
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Escape => {
-                    // Only meaningful when the buffer is detached by a jump.
+                    // The lightbox is the frontmost thing Escape can mean.
+                    if this.dismiss_overlay() {
+                        return glib::Propagation::Stop;
+                    }
+                    // Otherwise only meaningful when detached by a jump.
                     if this.return_to_present() {
                         glib::Propagation::Stop
                     } else {
@@ -2405,6 +2419,107 @@ impl ChatWindow {
         *self.buffer_menu.borrow_mut() = Some(popover);
     }
 
+    /// Show `content` as a lightbox over this window's conversation.
+    ///
+    /// Dismissed by clicking the backdrop or pressing Escape — clicks on the
+    /// content itself are swallowed, so interacting with the media does not
+    /// close it. Only one is ever up; opening a second replaces the first.
+    fn show_overlay(self: &Rc<Self>, content: &impl IsA<gtk::Widget>, caption: &str) {
+        self.dismiss_overlay();
+
+        let scrim = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        scrim.add_css_class("media-scrim");
+
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        body.add_css_class("media-body");
+        body.set_halign(gtk::Align::Center);
+        body.set_valign(gtk::Align::Center);
+        body.append(content);
+        if !caption.is_empty() {
+            body.append(
+                &gtk::Label::builder()
+                    .label(caption)
+                    .ellipsize(gtk::pango::EllipsizeMode::Middle)
+                    .css_classes(["media-caption"])
+                    .build(),
+            );
+        }
+
+        // Clicks on the body stop here, so only the backdrop dismisses.
+        let swallow = gtk::GestureClick::builder().button(0).build();
+        swallow.connect_pressed(|g, _, _, _| {
+            g.set_state(gtk::EventSequenceState::Claimed);
+        });
+        body.add_controller(swallow);
+
+        scrim.append(&body);
+
+        let weak = self.clone_handle();
+        let close = gtk::GestureClick::builder().button(1).build();
+        close.connect_released(move |_, _, _, _| {
+            if let Some(this) = weak.upgrade() {
+                this.dismiss_overlay();
+            }
+        });
+        scrim.add_controller(close);
+
+        self.overlay.add_overlay(&scrim);
+        *self.media_overlay.borrow_mut() = Some(scrim);
+    }
+
+    /// Take down the lightbox, if one is up. Returns whether it did anything,
+    /// so Escape can fall through to its other meanings when it isn't.
+    fn dismiss_overlay(&self) -> bool {
+        match self.media_overlay.borrow_mut().take() {
+            Some(scrim) => {
+                self.overlay.remove_overlay(&scrim);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Open an image in the lightbox, with click-to-toggle actual size.
+    fn view_image(self: &Rc<Self>, texture: &gtk::gdk::Texture, title: &str) {
+        let picture = gtk::Picture::for_paintable(texture);
+        picture.set_can_shrink(true);
+        picture.set_halign(gtk::Align::Center);
+        picture.set_valign(gtk::Align::Center);
+        // Fit inside the window with a margin, rather than at native size.
+        let (w, h) = (texture.width() as f64, texture.height() as f64);
+        let (max_w, max_h) =
+            ((self.window.width() as f64 - 120.0).max(320.0), (self.window.height() as f64 - 160.0).max(240.0));
+        let scale = (max_w / w).min(max_h / h).min(1.0);
+        picture.set_size_request((w * scale) as i32, (h * scale) as i32);
+        picture.set_cursor_from_name(Some("zoom-in"));
+
+        // Click the image to toggle between fitted and actual size.
+        let actual = std::rc::Rc::new(std::cell::Cell::new(false));
+        let tex = texture.clone();
+        let pic = picture.clone();
+        let toggle = gtk::GestureClick::builder().button(1).build();
+        toggle.connect_released(move |_, _, _, _| {
+            let now = !actual.get();
+            actual.set(now);
+            if now {
+                pic.set_size_request(tex.width(), tex.height());
+                pic.set_cursor_from_name(Some("zoom-out"));
+            } else {
+                pic.set_size_request((w * scale) as i32, (h * scale) as i32);
+                pic.set_cursor_from_name(Some("zoom-in"));
+            }
+        });
+        picture.add_controller(toggle);
+
+        let scroller = gtk::ScrolledWindow::builder()
+            .child(&picture)
+            .propagate_natural_width(true)
+            .propagate_natural_height(true)
+            .build();
+        scroller.set_size_request((w * scale) as i32, (h * scale) as i32);
+        self.show_overlay(&scroller, title);
+    }
+
     /// Ask for a channel to join on `net_id`, then join it.
     ///
     /// A small prompt rather than a full dialog: the only real input is the
@@ -2495,6 +2610,10 @@ impl ChatWindow {
                 Some("net.cmd::join"),
             ));
         }
+        manage.append_item(&gio::MenuItem::new(
+            Some("Browse channels…"),
+            Some("net.cmd::browse"),
+        ));
         manage.append_item(&gio::MenuItem::new(Some("Edit this network…"), Some("net.cmd::edit")));
         manage.append_item(&gio::MenuItem::new(Some("Add a network…"), Some("net.cmd::add")));
         manage.append_item(&gio::MenuItem::new(
@@ -2560,6 +2679,9 @@ impl ChatWindow {
                 });
             }
             "join" => self.prompt_join(net_id),
+            "browse" => {
+                crate::chanlist::open(&self.app, net_id, self.window.clone().upcast_ref())
+            }
             "remove" => {
                 // Destructive and account-wide: confirm, and name the network so
                 // there is no doubt which one is about to go.
@@ -2789,8 +2911,11 @@ impl ChatWindow {
                             let click = gtk::GestureClick::builder().button(1).build();
                             let tex = texture.clone();
                             let title = url.clone();
+                            let weak = self.clone_handle();
                             click.connect_released(move |_, _, _, _| {
-                                open_image_viewer(&tex, &title);
+                                if let Some(this) = weak.upgrade() {
+                                    this.view_image(&tex, &title);
+                                }
                             });
                             picture.add_controller(click);
                             Some(picture.upcast())
@@ -3368,6 +3493,12 @@ impl ChatWindow {
             // in a build without the `voice` feature — because falling through
             // to the raw fallback sent "CALL" to the IRC server and came back
             // "Unknown command", which explains nothing.
+            // The channel browser. Server-cached, so it opens instantly and
+            // only issues a real LIST when explicitly refreshed.
+            ("list" | "channels", Some(net)) => {
+                crate::chanlist::open(&self.app, net, self.window.clone().upcast_ref());
+                return true;
+            }
             ("call", _) => {
                 self.try_start_call();
                 return true;
@@ -3580,67 +3711,6 @@ fn clear_list(list: &gtk::ListBox) {
 
 /// A full-resolution image viewer. Opens fit-to-window (scaled down to fit,
 /// never up); clicking toggles 1:1 actual size inside a scroller so large
-/// images can be panned. Escape or closing the window dismisses it.
-fn open_image_viewer(texture: &gtk::gdk::Texture, title: &str) {
-    let mut builder = gtk::Window::builder()
-        .title(title)
-        .default_width(texture.width().clamp(320, 1200))
-        .default_height(texture.height().clamp(240, 900))
-        .destroy_with_parent(true);
-    // Anchor to the running app's active window so it opens in front.
-    let parent = gtk::gio::Application::default()
-        .and_then(|a| a.downcast::<gtk::Application>().ok())
-        .and_then(|a| a.active_window());
-    if let Some(parent) = &parent {
-        builder = builder.transient_for(parent);
-    }
-    let window = builder.build();
-    window.add_css_class("image-viewer");
-
-    let picture = gtk::Picture::for_paintable(texture);
-    picture.set_can_shrink(true);
-    picture.set_halign(gtk::Align::Center);
-    picture.set_valign(gtk::Align::Center);
-
-    let scroller = gtk::ScrolledWindow::builder().child(&picture).build();
-    window.set_child(Some(&scroller));
-
-    // Toggle fit / actual size on click.
-    let actual = std::rc::Rc::new(std::cell::Cell::new(false));
-    let tex = texture.clone();
-    let pic = picture.clone();
-    let click = gtk::GestureClick::builder().button(1).build();
-    click.connect_released(move |_, _, _, _| {
-        let now = !actual.get();
-        actual.set(now);
-        if now {
-            pic.set_can_shrink(false);
-            pic.set_size_request(tex.width(), tex.height());
-            pic.set_cursor_from_name(Some("zoom-out"));
-        } else {
-            pic.set_can_shrink(true);
-            pic.set_size_request(-1, -1);
-            pic.set_cursor_from_name(Some("zoom-in"));
-        }
-    });
-    picture.add_controller(click);
-    picture.set_cursor_from_name(Some("zoom-in"));
-
-    // Escape closes.
-    let keys = gtk::EventControllerKey::new();
-    let win = window.clone();
-    keys.connect_key_pressed(move |_, key, _, _| {
-        if key == gtk::gdk::Key::Escape {
-            win.close();
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    window.add_controller(keys);
-
-    window.present();
-}
 
 /// YouTube URLs in a message, for link previews. Returns (url, ()) to mirror
 /// the media_urls shape the caller iterates.

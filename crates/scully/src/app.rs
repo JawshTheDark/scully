@@ -126,6 +126,11 @@ pub struct App {
 
     /// Latest search results, and the token they answered — so a stale reply
     /// from a superseded query is dropped (§6's token discipline).
+    /// Channel-list rows for the browser window, with the query they answer
+    /// and whether a LIST refresh is still running.
+    pub chanlist: RefCell<Vec<lurker_proto::ChanlistRow>>,
+    pub chanlist_total: Cell<u32>,
+    pub chanlist_loading: Cell<bool>,
     pub search_results: RefCell<Vec<lurker_proto::MessageEvent>>,
     pub search_token: Cell<i64>,
     pub search_more: Cell<bool>,
@@ -174,6 +179,9 @@ impl App {
             device: RefCell::new(DeviceSettings::load()),
             images: crate::media::ImageCache::default(),
             previews: RefCell::new(std::collections::HashMap::new()),
+            chanlist: RefCell::new(Vec::new()),
+            chanlist_total: Cell::new(0),
+            chanlist_loading: Cell::new(false),
             search_results: RefCell::new(Vec::new()),
             search_token: Cell::new(0),
             search_more: Cell::new(false),
@@ -435,6 +443,14 @@ impl App {
                             self.search_more.set(*has_more);
                             self.notify(&[StoreEvent::SearchResults]);
                         }
+                    }
+                    lurker_proto::ServerFrame::ChanlistResult { rows, total, in_progress, .. } => {
+                        *self.chanlist.borrow_mut() = rows.clone();
+                        self.chanlist_total.set(*total);
+                        self.chanlist_loading.set(*in_progress);
+                    }
+                    lurker_proto::ServerFrame::ChanlistState { in_progress, .. } => {
+                        self.chanlist_loading.set(*in_progress);
                     }
                     lurker_proto::ServerFrame::Settings { changes, .. } => {
                         if let Some(map) = changes.as_object() {
@@ -842,6 +858,25 @@ impl App {
                 }
             },
         );
+    }
+
+    /// Ask the server to refresh its cached channel list (sends a real `LIST`).
+    pub fn list_channels(&self, network_id: i64) {
+        self.chanlist_loading.set(true);
+        self.send(ClientVerb::ListChannels { network_id });
+    }
+
+    /// Query the server's cached channel list. Paging and sorting happen
+    /// server-side — a large network's list is far too big to hold client-side.
+    pub fn chanlist_search(&self, network_id: i64, query: &str) {
+        self.send(ClientVerb::ChanlistSearch {
+            network_id,
+            query: query.to_string(),
+            sort_by: "users".into(),
+            sort_dir: "desc".into(),
+            offset: 0,
+            limit: 200,
+        });
     }
 
     /// Explicit user intent to open a buffer — the one place `open-buffer` is

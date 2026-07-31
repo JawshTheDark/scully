@@ -301,7 +301,7 @@ pub const KNOWN: &[&str] = &[
     // IRCv3 client-facing commands (see the module notes on what is excluded).
     "setname", "realname", "monitor", "redact", "metadata",
     // CTCP goes out as a typed verb (a PRIVMSG in \x01), never a raw IRC line.
-    "ctcp", "ping",
+    "ctcp", "ping", "list", "channels",
 ];
 
 #[cfg(test)]
