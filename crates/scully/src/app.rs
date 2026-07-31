@@ -471,7 +471,20 @@ impl App {
                         target_ = %b.target, mode = ?b.merge_mode(), events = b.events.len(),
                         "← backlog"
                     ),
-                    other => tracing::debug!(frame = ?other, "← server"),
+                    // A summary, never the whole frame. Debug-formatting a
+                    // MessageEvent prints its `members` vector in full, so a
+                    // single NAMES burst on a large channel dumped hundreds of
+                    // Member structs into one line — megabytes of formatting
+                    // that also made the log useless to read.
+                    lurker_proto::ServerFrame::Irc(e) => tracing::debug!(
+                        kind = ?e.event_type,
+                        target_ = e.target.as_deref().unwrap_or(""),
+                        nick = e.nick.as_deref().unwrap_or(""),
+                        id = ?e.id,
+                        members = e.members.as_ref().map(|m| m.len()),
+                        "← irc"
+                    ),
+                    other => tracing::debug!(frame = frame_label(other), "← server"),
                 }
                 let events = self.store.borrow_mut().apply_frame(*frame);
                 // Publish the cursor for the socket task's next reconnect.
@@ -1064,6 +1077,28 @@ impl App {
             ConnState::Backoff(d) => Some(*d),
             _ => None,
         }
+    }
+}
+
+/// A frame's variant name, for logging. Deliberately not `{:?}` of the frame:
+/// several variants carry whole nicklists or backlog pages, and formatting
+/// those to a log line is both slow and unreadable.
+fn frame_label(frame: &lurker_proto::ServerFrame) -> &'static str {
+    use lurker_proto::ServerFrame as F;
+    match frame {
+        F::Snapshot(_) => "snapshot",
+        F::Backlog(_) => "backlog",
+        F::History(_) => "history",
+        F::Irc(_) => "irc",
+        F::ReadState(_) => "read-state",
+        F::BacklogComplete => "backlog-complete",
+        F::ChanlistResult { .. } => "chanlist-result",
+        F::ChanlistState { .. } => "chanlist-state",
+        F::CallPresence { .. } => "call-presence",
+        F::SearchResult { .. } => "search-result",
+        F::Settings { .. } => "settings",
+        F::Error { .. } => "error",
+        _ => "other",
     }
 }
 
