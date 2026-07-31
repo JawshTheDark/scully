@@ -743,8 +743,12 @@ impl ChatWindow {
                 return glib::Propagation::Proceed;
             }
             match keyval {
-                gtk::gdk::Key::Tab => {
-                    this.complete_nick();
+                // Shift+Tab arrives as ISO_Left_Tab on X11/Wayland, not as Tab
+                // with a modifier, so both spellings are checked.
+                gtk::gdk::Key::Tab | gtk::gdk::Key::ISO_Left_Tab => {
+                    let back = keyval == gtk::gdk::Key::ISO_Left_Tab
+                        || state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                    this.complete_nick(if back { -1 } else { 1 });
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Up => {
@@ -2591,50 +2595,87 @@ impl ChatWindow {
     /// Tab completion over recent speakers then the nicklist
     /// (`crate::input::candidates` — §9.3: self-echoes are skipped when
     /// ranking speakers). Repeated Tab cycles in place.
-    fn complete_nick(&self) {
+    /// Tab completion. `direction` is +1 for Tab and -1 for Shift+Tab, so a
+    /// cycle overshot by one keypress costs one keypress to undo rather than a
+    /// full lap through the candidates.
+    ///
+    /// What gets completed depends on where the cursor is (see input::classify):
+    /// a slash command in the first column, a channel by its sigil, otherwise a
+    /// nick.
+    fn complete_nick(&self, direction: i32) {
         let text = self.entry.text().to_string();
         let cursor = self.entry.position().max(0) as usize;
 
-        // Continue an existing cycle.
+        // Continue an existing cycle. The stored kind matters: cycling must keep
+        // completing the same category the cycle started in.
         let cycling = self.completion.borrow_mut().as_mut().map(|(s, c, i)| {
-            *i = (*i + 1) % c.len();
+            let len = c.len();
+            *i = if direction < 0 { (*i + len - 1) % len } else { (*i + 1) % len };
             (*s, c[*i].clone())
         });
-        if let Some((anchor, nick)) = cycling {
+        if let Some((anchor, value)) = cycling {
+            let kind = crate::input::classify(&text, cursor).2;
             let (new_text, new_cursor) =
-                crate::input::complete(&text, cursor, anchor as usize, &nick);
+                crate::input::complete(&text, cursor, anchor as usize, &value, kind);
             self.entry.set_text(&new_text);
             self.entry.set_position(new_cursor as i32);
             return;
         }
 
-        let (anchor, prefix) = crate::input::prefix_at(&text, cursor);
-        if prefix.is_empty() {
+        let (anchor, prefix, kind) = crate::input::classify(&text, cursor);
+        // A bare "/" is a legitimate "what can I type?" prompt, so commands may
+        // complete from an empty prefix; nicks and channels may not — Tab on
+        // nothing would dump the whole nicklist into the composer.
+        if prefix.is_empty() && kind != crate::input::Token::Command {
             return;
         }
         let Some(key) = self.active.borrow().clone() else { return };
-        let store = self.app.store.borrow();
-        let Some(buf) = store.buffer(&key) else { return };
-        let own = key
-            .network_id
-            .and_then(|id| store.networks.get(&id))
-            .and_then(|n| n.nick.clone());
 
-        let recent = buf
-            .events
-            .iter()
-            .rev()
-            .filter(|e| !e.is_self && e.event_type.is_chat())
-            .filter_map(|e| e.nick.clone());
-        let members = buf.members.values().map(|m| m.nick.clone());
-        let candidates = crate::input::candidates(&prefix, recent, members, own.as_deref());
-        drop(store);
+        let candidates = match kind {
+            crate::input::Token::Command => {
+                crate::input::command_candidates(&prefix, crate::commands::KNOWN)
+            }
+            crate::input::Token::Channel => {
+                // Channels you already have open on this network, so completion
+                // reflects where you actually are.
+                let store = self.app.store.borrow();
+                let mut names: Vec<String> = store
+                    .buffers
+                    .iter()
+                    .filter(|(k, _)| k.network_id == key.network_id && k.is_channel())
+                    .map(|(_, b)| b.display_name.clone())
+                    .filter(|n| n.to_ascii_lowercase().starts_with(&prefix))
+                    .collect();
+                names.sort();
+                names.dedup();
+                names
+            }
+            crate::input::Token::Nick => {
+                let store = self.app.store.borrow();
+                let Some(buf) = store.buffer(&key) else { return };
+                let own = key
+                    .network_id
+                    .and_then(|id| store.networks.get(&id))
+                    .and_then(|n| n.nick.clone());
+                let recent = buf
+                    .events
+                    .iter()
+                    .rev()
+                    .filter(|e| !e.is_self && e.event_type.is_chat())
+                    .filter_map(|e| e.nick.clone());
+                let members = buf.members.values().map(|m| m.nick.clone());
+                crate::input::candidates(&prefix, recent, members, own.as_deref())
+            }
+        };
+
         if candidates.is_empty() {
             return;
         }
-        let nick = candidates[0].clone();
-        *self.completion.borrow_mut() = Some((anchor as i32, candidates, 0));
-        let (new_text, new_cursor) = crate::input::complete(&text, cursor, anchor, &nick);
+        // Shift+Tab with no cycle in progress starts from the last candidate.
+        let first = if direction < 0 { candidates.len() - 1 } else { 0 };
+        let nick = candidates[first].clone();
+        *self.completion.borrow_mut() = Some((anchor as i32, candidates, first));
+        let (new_text, new_cursor) = crate::input::complete(&text, cursor, anchor, &nick, kind);
         self.entry.set_text(&new_text);
         self.entry.set_position(new_cursor as i32);
     }

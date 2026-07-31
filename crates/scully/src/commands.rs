@@ -197,7 +197,7 @@ pub const KNOWN: &[&str] = &[
     "quiet", "unquiet", "kick", "kickban", "kb", "invite", "remove", "nick", "who", "whowas",
     "ison", "userhost", "motd", "lusers", "links", "map", "stats", "time", "version", "info",
     "oper", "ns", "cs", "ms", "os", "bs", "hs", "identify", "quote", "raw", "quit", "shrug",
-    "tableflip", "unflip", "slap", "help",
+    "tableflip", "unflip", "slap", "help", "call",
 ];
 
 #[cfg(test)]
