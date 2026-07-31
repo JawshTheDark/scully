@@ -35,7 +35,18 @@
 window {
   background-color: @bg;
   color: @fg;
-  font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+  /* Nice-if-installed faces first, then a real system monospace for EACH
+     platform, and only then the generic. The previous stack named three fonts
+     that all happen to be Linux-common and none of which ship on macOS or
+     Windows, so those platforms fell through to generic `monospace` — which
+     fontconfig resolves to whatever it can find, and on macOS that is the
+     badly-rendered fallback people were reporting. Menlo is present on every
+     macOS since 10.6; Consolas on every Windows since Vista. */
+  font-family: "JetBrains Mono", "Fira Code",
+               "SF Mono", "Menlo", "Monaco",
+               "Cascadia Mono", "Consolas",
+               "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono",
+               monospace;
   font-size: 10.5pt;
 }
 
