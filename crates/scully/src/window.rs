@@ -941,6 +941,33 @@ impl ChatWindow {
         let this = self.clone();
         self.call_button.connect_clicked(move |_| this.try_start_call());
 
+        // A context menu no longer takes a grab (see open_nick_menu), so
+        // dismissing it is our job. Capture phase, on the root: any press that
+        // lands outside the open menu closes it, and the event still travels on
+        // to whatever was clicked — which is what lets a second right-click
+        // open a new menu at the new place instead of merely closing the old.
+        let this = self.clone();
+        let dismiss = gtk::GestureClick::builder()
+            .button(0)
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
+        dismiss.connect_pressed(move |_, _, x, y| {
+            let open = this
+                .nick_menu
+                .borrow()
+                .clone()
+                .map(|p| p.upcast::<gtk::Widget>())
+                .or_else(|| this.buffer_menu.borrow().clone().map(|p| p.upcast::<gtk::Widget>()));
+            let Some(menu) = open else { return };
+            let inside = menu
+                .compute_bounds(&this.overlay)
+                .is_some_and(|r| r.contains_point(&gtk::graphene::Point::new(x as f32, y as f32)));
+            if !inside {
+                this.close_menus();
+            }
+        });
+        self.overlay.add_controller(dismiss);
+
         // Window-level shortcuts: Ctrl+F search here, Ctrl+Shift+F search
         // everywhere, Ctrl+K quick switcher, Escape returns a detached buffer
         // to the live present.
@@ -979,7 +1006,11 @@ impl ChatWindow {
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Escape => {
-                    // The lightbox is the frontmost thing Escape can mean.
+                    // A context menu is the frontmost thing Escape can mean,
+                    // then the lightbox.
+                    if this.close_menus() {
+                        return glib::Propagation::Stop;
+                    }
                     if this.dismiss_overlay() {
                         return glib::Propagation::Stop;
                     }
@@ -2348,6 +2379,8 @@ impl ChatWindow {
         let group = gio::SimpleActionGroup::new();
         let action = gio::SimpleAction::new("cmd", Some(glib::VariantTy::STRING));
         action.connect_activate(move |_, param| {
+            // Without a grab the menu does not dismiss itself on activate.
+            this.close_menus();
             if let Some(id) = param.and_then(|p| p.get::<String>()) {
                 this.run_nick_command(&id);
             }
@@ -2366,6 +2399,7 @@ impl ChatWindow {
             .map(|p| (p.x() as i32, p.y() as i32))
             .unwrap_or((x, y));
         popover.set_parent(&self.member_pane);
+        popover.set_autohide(false);
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
         popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(px, py, 1, 1)));
@@ -2405,6 +2439,7 @@ impl ChatWindow {
         let group = gio::SimpleActionGroup::new();
         let action = gio::SimpleAction::new("cmd", Some(glib::VariantTy::STRING));
         action.connect_activate(move |_, param| {
+            this.close_menus();
             if let Some(id) = param.and_then(|p| p.get::<String>()) {
                 this.run_buffer_command(&id);
             }
@@ -2422,6 +2457,7 @@ impl ChatWindow {
             .map(|p| (p.x() as i32, p.y() as i32))
             .unwrap_or((x, y));
         popover.set_parent(&self.buffer_pane);
+        popover.set_autohide(false);
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
         popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(px, py, 1, 1)));
@@ -2594,6 +2630,20 @@ impl ChatWindow {
     ///
     /// These act on the *bouncer's* connection, so they reach every device on
     /// the account — which is why removal asks first.
+    /// Close any open context menu. Returns whether one was up.
+    fn close_menus(&self) -> bool {
+        let mut closed = false;
+        if let Some(p) = self.nick_menu.borrow_mut().take() {
+            p.unparent();
+            closed = true;
+        }
+        if let Some(p) = self.buffer_menu.borrow_mut().take() {
+            p.unparent();
+            closed = true;
+        }
+        closed
+    }
+
     /// `x`/`y` are in the sidebar PANE's coordinate space, already mapped by
     /// the caller — only it knows which row was clicked.
     fn open_network_menu(
@@ -2641,6 +2691,7 @@ impl ChatWindow {
         let group = gio::SimpleActionGroup::new();
         let action = gio::SimpleAction::new("cmd", Some(glib::VariantTy::STRING));
         action.connect_activate(move |_, param| {
+            this.close_menus();
             let Some(id) = param.and_then(|p| p.get::<String>()) else { return };
             this.run_network_command(net_id, &name, &id);
         });
@@ -2652,6 +2703,7 @@ impl ChatWindow {
         // only place that knows which row was clicked.
         let (px, py) = (x, y);
         popover.set_parent(&self.buffer_pane);
+        popover.set_autohide(false);
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
         popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(px, py, 1, 1)));
