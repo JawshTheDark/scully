@@ -788,7 +788,20 @@ impl App {
         let fetch_url = url.clone();
         self.spawn_async(
             async move {
-                let client = reqwest::Client::new();
+                // A timeout is not optional here. Without one a host that
+                // accepts the connection and then stalls leaves this task alive
+                // forever AND leaves the url marked in-flight, so `begin()`
+                // refuses every retry: the image silently never appears again
+                // for the rest of the session. Generous, because image hosts
+                // are routinely slow — catbox takes ~11s for a 640KB png — but
+                // bounded.
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(60))
+                    .connect_timeout(std::time::Duration::from_secs(15))
+                    // Some hosts refuse or throttle requests without one.
+                    .user_agent(concat!("Scully/", env!("CARGO_PKG_VERSION")))
+                    .build()
+                    .ok()?;
                 let resp = client.get(&fetch_url).send().await.ok()?;
                 if !resp.status().is_success() {
                     return None;

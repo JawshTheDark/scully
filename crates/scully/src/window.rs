@@ -68,6 +68,10 @@ pub struct ChatWindow {
     rebuilding: Cell<bool>,
     /// Rows in the buffer list, in display order.
     rows: RefCell<Vec<BufferKey>>,
+    /// Buffer-list sections the user has folded away, by header title. Per
+    /// window: two windows watching different networks should be able to
+    /// collapse different things.
+    collapsed: RefCell<std::collections::HashSet<String>>,
     /// Nicks this window issued a whois for while the "show in active buffer"
     /// setting was on, folded → the buffer to show the result in. Only the
     /// initiating window renders the fan-out result, so other windows don't
@@ -340,6 +344,7 @@ impl ChatWindow {
             drawn: RefCell::new(Drawn::default()),
             rebuilding: Cell::new(false),
             rows: RefCell::new(Vec::new()),
+            collapsed: RefCell::new(std::collections::HashSet::new()),
             embeds: RefCell::new(Vec::new()),
             pending_whois: RefCell::new(std::collections::HashMap::new()),
             weak_self: RefCell::new(std::rc::Weak::new()),
@@ -1201,8 +1206,26 @@ impl ChatWindow {
             });
         }
 
+        // Direct messages sit directly under the pinned channels: they are
+        // people, not places, and a conversation you are actually having
+        // outranks the list of rooms you happen to be in.
+        let mut dms: Vec<BufferKey> = store
+            .buffers
+            .iter()
+            .filter(|(k, b)| k.is_dm() && !b.pinned)
+            .map(|(k, _)| k.clone())
+            .collect();
+        dms.sort_by_key(|k| k.target.clone());
+        if !dms.is_empty() {
+            sections.push(Section {
+                header: Some("✉ DIRECT MESSAGES".to_string()),
+                offline: false,
+                keys: dms,
+            });
+        }
+
         // Each network: server log + its non-pinned CHANNELS (DMs and DCC go
-        // to their own sections below).
+        // to their own sections).
         for (id, net) in store.networks.iter() {
             let mut keys: Vec<BufferKey> = store
                 .buffers
@@ -1224,22 +1247,6 @@ impl ChatWindow {
                 header: Some(name),
                 offline: net.state != lurker_proto::NetworkState::Connected,
                 keys,
-            });
-        }
-
-        // Direct messages — non-pinned, all networks.
-        let mut dms: Vec<BufferKey> = store
-            .buffers
-            .iter()
-            .filter(|(k, b)| k.is_dm() && !b.pinned)
-            .map(|(k, _)| k.clone())
-            .collect();
-        dms.sort_by_key(|k| k.target.clone());
-        if !dms.is_empty() {
-            sections.push(Section {
-                header: Some("✉ DIRECT MESSAGES".to_string()),
-                offline: false,
-                keys: dms,
             });
         }
 
@@ -1265,25 +1272,95 @@ impl ChatWindow {
         let mut select_index: Option<i32> = None;
 
         for section in sections {
+            // A section with a header can be folded away by clicking it.
+            let folded = section
+                .header
+                .as_ref()
+                .is_some_and(|t| self.collapsed.borrow().contains(t));
+
             if let Some(title) = &section.header {
+                // Collapsing must not hide the fact that something wants
+                // attention, so a folded section carries its contents' unread
+                // and highlight totals on the header itself.
+                let (unread, highlights) = section.keys.iter().fold((0, 0), |(u, h), k| {
+                    store.buffer(k).map_or((u, h), |b| (u + b.unread, h + b.highlights))
+                });
+
+                let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                let caret = gtk::Label::builder()
+                    .label(if folded { "▸" } else { "▾" })
+                    .css_classes(["network-header"])
+                    .build();
                 let header = gtk::Label::builder()
                     .xalign(0.0)
                     .label(title)
+                    .hexpand(true)
                     .css_classes(["network-header"])
                     .build();
                 if section.offline {
                     header.add_css_class("offline");
                 }
+                header_box.append(&caret);
+                header_box.append(&header);
+                if folded && (unread > 0 || highlights > 0) {
+                    let badge = gtk::Label::builder()
+                        .label(if highlights > 0 {
+                            highlights.to_string()
+                        } else {
+                            unread.to_string()
+                        })
+                        .css_classes(if highlights > 0 {
+                            vec!["badge", "badge-highlight"]
+                        } else {
+                            vec!["badge"]
+                        })
+                        .build();
+                    header_box.append(&badge);
+                }
+
                 let row = gtk::ListBoxRow::builder()
-                    .child(&header)
+                    .child(&header_box)
                     .selectable(false)
                     .activatable(false)
                     .build();
+
+                // Toggle on click. The controller lives on the header widget
+                // rather than the list, so no row-index bookkeeping is needed
+                // to work out which section was hit.
+                let click = gtk::GestureClick::builder().button(1).build();
+                let weak = self.clone_handle();
+                let title = title.clone();
+                click.connect_pressed(move |gesture, _, _, _| {
+                    let Some(this) = weak.upgrade() else { return };
+                    {
+                        let mut set = this.collapsed.borrow_mut();
+                        if !set.remove(&title) {
+                            set.insert(title.clone());
+                        }
+                    }
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    // Rebuild on the next idle rather than here: this handler is
+                    // running *inside* the very row the rebuild destroys, and
+                    // tearing a widget down underneath its own live gesture
+                    // controller is how this client has crashed before.
+                    let weak = this.clone_handle();
+                    glib::idle_add_local_once(move || {
+                        if let Some(this) = weak.upgrade() {
+                            this.rebuild_buffer_list();
+                        }
+                    });
+                });
+                row.add_controller(click);
+
                 self.buffer_list.append(&row);
                 // A non-selectable header still occupies a ListBox index, so
                 // `rows` needs a placeholder to stay index-aligned. A sentinel
                 // server key is harmless — header rows are never activated.
                 rows.push(BufferKey::system());
+            }
+
+            if folded {
+                continue;
             }
 
             for key in section.keys {
