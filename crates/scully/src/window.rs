@@ -991,8 +991,24 @@ impl ChatWindow {
         // Follow the window width into and out of the phone layout. Width, not
         // a device check: a desktop window dragged narrow gets the same layout,
         // which is also the only way to exercise it without a phone.
-        let this = self.clone();
-        self.window.connect_default_width_notify(move |_| this.apply_narrow_layout());
+        // Follow the ALLOCATED width, via the frame clock. `default-width` is
+        // the size we asked for, and a compositor that maximises us — which is
+        // exactly what a phone shell does — never changes it, so watching that
+        // property meant the layout never re-evaluated on the one device this
+        // is for. The callback compares an i32 per frame and does nothing until
+        // it actually changes.
+        let weak = self.clone_handle();
+        let last_width = Cell::new(-1i32);
+        self.window.add_tick_callback(move |w, _| {
+            let width = w.width();
+            if width != last_width.get() {
+                last_width.set(width);
+                if let Some(this) = weak.upgrade() {
+                    this.apply_narrow_layout();
+                }
+            }
+            glib::ControlFlow::Continue
+        });
         let this = self.clone();
         self.btn_back.connect_clicked(move |_| this.narrow_show_list());
 
@@ -1252,10 +1268,14 @@ impl ChatWindow {
     }
 
     /// Width below which the three-pane layout stops fitting and Scully shows
-    /// one pane at a time. A FuriPhone is 720 logical pixels wide in portrait;
-    /// a desktop window dragged this narrow wants the same treatment, so the
-    /// trigger is width, never a device check.
-    const NARROW_WIDTH: i32 = 640;
+    /// one pane at a time.
+    ///
+    /// 800, not 640: a FuriPhone is 720 logical pixels wide in portrait, so a
+    /// 640 threshold never fired on the exact device this exists for — it just
+    /// crushed the message column to a sliver between the sidebar and the
+    /// nicklist. A desktop window dragged this narrow wants the same treatment,
+    /// so the trigger stays width and never a device check.
+    const NARROW_WIDTH: i32 = 800;
 
     /// Re-evaluate the phone layout for the current window width.
     ///
