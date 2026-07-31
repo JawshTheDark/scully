@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Scully's icon: a terminal-dark tile with a chat caret and a torch beam.
+       Palette is Lurker's own (bg #212022, accent #a99dec, warn #f9d978), so the
+       launcher entry matches the app it opens. -->
+  <rect width="256" height="256" rx="52" fill="#212022"/>
+  <rect x="4" y="4" width="248" height="248" rx="48" fill="none" stroke="#3a383c" stroke-width="4"/>
+
+  <!-- Torch beam: the one at the desk who wants evidence. -->
+  <path d="M128 54 L196 186 A76 76 0 0 1 60 186 Z" fill="#a99dec" opacity="0.10"/>
+
+  <!-- Speech caret, the app's actual job. -->
+  <path d="M64 84 h128 a16 16 0 0 1 16 16 v56 a16 16 0 0 1 -16 16 h-52 l-28 26 v-26 h-48
+           a16 16 0 0 1 -16 -16 v-56 a16 16 0 0 1 16 -16 z"
+        fill="none" stroke="#a99dec" stroke-width="10" stroke-linejoin="round"/>
+
+  <!-- Unread pip, in the highlight colour. -->
+  <circle cx="186" cy="92" r="18" fill="#f9d978"/>
+</svg>

@@ -1,17 +1,19 @@
-# Build release artefacts for Linux, macOS and Windows and attach them to a
+# Build installable packages for Linux, macOS and Windows and attach them to a
 # GitHub Release.
 #
-# On what these bundles are, honestly: GTK is a shared library, not a crate that
-# links in, so a Scully binary needs a GTK 4 runtime beside it. Linux and macOS
-# builds therefore depend on GTK being installed (one package, one command, and
-# on Linux it is very often already there). The Windows build carries its own
-# DLLs, because expecting a Windows user to install MSYS2 first is not a
-# reasonable thing to ship.
+# Packages, not archives: a .deb or .rpm declares its GTK dependency so the
+# package manager fetches it, drops a .desktop file so the app appears in the
+# launcher, and uninstalls cleanly. That matters most on a phone — FuriOS and
+# Mobian are Debian, and an app that is not in the launcher may as well not be
+# installed.
 #
-# The `voice` feature is deliberately NOT built: it pulls a prebuilt libwebrtc,
-# which would add hundreds of megabytes to every artefact for a feature that is
-# off unless the server also runs an SFU. Voice is a `--features voice` build
-# from source, and the README says so.
+# Windows gets a real installer carrying its own GTK runtime, because there is
+# no system GTK to depend on there. macOS gets a .app inside a .dmg with its
+# libraries bundled.
+#
+# The `voice` feature is deliberately excluded: it pulls a prebuilt libwebrtc,
+# hundreds of megabytes, for something that does nothing unless the server also
+# runs an SFU. Voice is a `--features voice` build from source.
 
 name: Release
 
@@ -28,103 +30,166 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Linux: .deb and .rpm, for both architectures ──────────────────────────
   linux:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            deb_arch: amd64
+            rpm_arch: x86_64
+          # FuriPhone (FuriOS), Mobian, PinePhone, ARM laptops, Raspberry Pi.
+          - runner: ubuntu-24.04-arm
+            deb_arch: arm64
+            rpm_arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install GTK4
+      - name: Build
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev
-      - run: cargo build --release -p scully
-      - name: Stage
+          sudo apt-get install -y libgtk-4-dev rpm
+          cargo build --release -p scully
+
+      - name: Resolve version
+        id: v
         run: |
-          mkdir -p dist/scully
-          cp target/release/scully dist/scully/
-          cp README.md LICENSE* dist/scully/ 2>/dev/null || true
-          cat > dist/scully/RUN.txt <<'EOF'
-          Scully needs a GTK 4 runtime (4.12 or newer).
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-            Debian/Ubuntu   sudo apt install libgtk-4-1
-            Fedora          sudo dnf install gtk4
-            Arch            sudo pacman -S gtk4
+      - name: Stage a filesystem tree
+        run: |
+          set -eu
+          V="${{ steps.v.outputs.version }}"
+          mkdir -p pkg/usr/bin \
+                   pkg/usr/share/applications \
+                   pkg/usr/share/icons/hicolor/scalable/apps \
+                   pkg/usr/share/doc/scully
+          install -m755 target/release/scully              pkg/usr/bin/scully
+          install -m644 packaging/scully.desktop           pkg/usr/share/applications/scully.desktop
+          install -m644 packaging/scully.svg               pkg/usr/share/icons/hicolor/scalable/apps/scully.svg
+          install -m644 README.md                          pkg/usr/share/doc/scully/README.md
 
-          Then: ./scully
+      - name: Build .deb
+        run: |
+          set -eu
+          V="${{ steps.v.outputs.version }}"
+          mkdir -p pkg/DEBIAN
+          # Depends names the runtime so apt installs GTK for the user. That is
+          # the entire reason to ship a package rather than a tarball.
+          cat > pkg/DEBIAN/control <<EOF
+          Package: scully
+          Version: ${V}
+          Section: net
+          Priority: optional
+          Architecture: ${{ matrix.deb_arch }}
+          Depends: libgtk-4-1 (>= 4.12)
+          Maintainer: JawshTheDark <noreply@users.noreply.github.com>
+          Description: Native GTK4 client for a Lurker IRC bouncer
+           Scully is a native desktop client for the self-hosted Lurker IRC
+           bouncer. It adapts to phone-sized screens, so it is usable on FuriOS,
+           Mobian and other GTK4 handsets as well as on the desktop.
           EOF
-          tar -czf scully-linux-x86_64.tar.gz -C dist scully
+          dpkg-deb --build --root-owner-group pkg "scully_${V}_${{ matrix.deb_arch }}.deb"
+
+      - name: Build .rpm
+        run: |
+          set -eu
+          V="${{ steps.v.outputs.version }}"
+          mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,BUILDROOT}
+          cat > rpmbuild/SPECS/scully.spec <<EOF
+          Name:           scully
+          Version:        ${V}
+          Release:        1
+          Summary:        Native GTK4 client for a Lurker IRC bouncer
+          License:        MPL-2.0
+          URL:            https://github.com/JawshTheDark/scully
+          Requires:       gtk4 >= 4.12
+          %description
+          Scully is a native desktop client for the self-hosted Lurker IRC
+          bouncer, with a single-pane layout on phone-sized screens.
+          %install
+          mkdir -p %{buildroot}
+          cp -a %{_sourcedir}/tree/. %{buildroot}/
+          %files
+          /usr/bin/scully
+          /usr/share/applications/scully.desktop
+          /usr/share/icons/hicolor/scalable/apps/scully.svg
+          /usr/share/doc/scully/README.md
+          EOF
+          mkdir -p rpmbuild/SOURCES/tree
+          cp -a pkg/usr rpmbuild/SOURCES/tree/
+          rpmbuild --define "_topdir $PWD/rpmbuild" \
+                   --define "_sourcedir $PWD/rpmbuild/SOURCES" \
+                   --target "${{ matrix.rpm_arch }}" \
+                   -bb rpmbuild/SPECS/scully.spec
+          find rpmbuild/RPMS -name '*.rpm' -exec cp {} . \;
+
       - uses: actions/upload-artifact@v4
         with:
-          name: linux
-          path: scully-linux-x86_64.tar.gz
+          name: linux-${{ matrix.deb_arch }}
+          path: |
+            *.deb
+            *.rpm
 
-  # aarch64 Linux — Raspberry Pi class hardware, ARM laptops, and Linux phones
-  # such as the FuriPhone (FuriOS is Debian-based on arm64).
-  linux-arm64:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install GTK4
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev
-      - run: cargo build --release -p scully
-      - name: Stage
-        run: |
-          mkdir -p dist/scully
-          cp target/release/scully dist/scully/
-          cp README.md LICENSE* dist/scully/ 2>/dev/null || true
-          cat > dist/scully/RUN.txt <<'EOF'
-          Scully needs a GTK 4 runtime (4.12 or newer).
-
-            Debian/FuriOS   sudo apt install libgtk-4-1
-            Fedora          sudo dnf install gtk4
-            Arch            sudo pacman -S gtk4
-
-          Then: ./scully
-
-          On a phone-sized screen Scully switches to a single-pane layout
-          automatically; no flag or setting is needed.
-          EOF
-          tar -czf scully-linux-aarch64.tar.gz -C dist scully
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-arm64
-          path: scully-linux-aarch64.tar.gz
-
+  # ── macOS: a real .app inside a .dmg ──────────────────────────────────────
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install GTK4
-        run: brew install gtk4 pkg-config
-      - run: cargo build --release -p scully
-      - name: Stage
+      - name: Build
         run: |
-          mkdir -p dist/scully
-          cp target/release/scully dist/scully/
-          cp README.md LICENSE* dist/scully/ 2>/dev/null || true
-          cat > dist/scully/RUN.txt <<'EOF'
-          Scully needs a GTK 4 runtime:
+          brew install gtk4 pkg-config dylibbundler
+          cargo build --release -p scully
 
-            brew install gtk4
+      - name: Resolve version
+        id: v
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-          Then: ./scully
+      - name: Assemble Scully.app and a .dmg
+        run: |
+          set -eu
+          V="${{ steps.v.outputs.version }}"
+          APP="Scully.app/Contents"
+          mkdir -p "$APP/MacOS" "$APP/Resources" "$APP/libs"
+          cp target/release/scully "$APP/MacOS/scully"
 
-          This binary is unsigned, so the first launch needs
-          right-click > Open, or:  xattr -dr com.apple.quarantine scully
+          cat > "$APP/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Scully</string>
+            <key>CFBundleDisplayName</key><string>Scully</string>
+            <key>CFBundleIdentifier</key><string>io.jawsh.Scully</string>
+            <key>CFBundleVersion</key><string>${V}</string>
+            <key>CFBundleShortVersionString</key><string>${V}</string>
+            <key>CFBundleExecutable</key><string>scully</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+          </dict></plist>
           EOF
-          tar -czf scully-macos-$(uname -m).tar.gz -C dist scully
+
+          # Copy every Homebrew dylib the binary reaches and rewrite its install
+          # names, so the app runs on a Mac with no Homebrew at all.
+          dylibbundler -od -b -x "$APP/MacOS/scully" -d "$APP/libs" -p @executable_path/../libs
+
+          hdiutil create -volname "Scully" -srcfolder Scully.app -ov -format UDZO \
+            "scully-${V}-macos-arm64.dmg"
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: scully-macos-*.tar.gz
+          path: '*.dmg'
 
+  # ── Windows: an installer that carries its own GTK ────────────────────────
   windows:
     runs-on: windows-latest
     defaults:
@@ -140,46 +205,78 @@ jobs:
             mingw-w64-x86_64-gtk4
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-rust
-            zip
+            mingw-w64-x86_64-nsis
       - run: cargo build --release -p scully
-      - name: Stage with its runtime
+
+      - name: Resolve version
+        id: v
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the runtime and build the installer
         run: |
           set -eu
-          mkdir -p dist/scully
-          cp target/release/scully.exe dist/scully/
+          V="${{ steps.v.outputs.version }}"
+          mkdir -p stage
+          cp target/release/scully.exe stage/
 
-          # Every MinGW DLL the binary resolves to, so the zip runs on a machine
-          # with no MSYS2. ldd lists transitive dependencies, which is what makes
-          # this a one-pass copy rather than a game of whack-a-mole.
-          ldd dist/scully/scully.exe \
-            | grep -i '/mingw64/' \
-            | awk '{print $3}' \
-            | sort -u \
-            | while read -r dll; do cp -u "$dll" dist/scully/; done
+          # ldd resolves transitively, so one pass collects the whole GTK stack.
+          ldd stage/scully.exe | grep -i '/mingw64/' | awk '{print $3}' | sort -u \
+            | while read -r dll; do cp -u "$dll" stage/; done
 
-          # GTK refuses to start without its compiled settings schemas, and
-          # loads image formats through gdk-pixbuf's loader modules — inline
-          # images are blank without them.
-          mkdir -p dist/scully/share/glib-2.0/schemas
-          cp /mingw64/share/glib-2.0/schemas/*.xml dist/scully/share/glib-2.0/schemas/ 2>/dev/null || true
-          glib-compile-schemas dist/scully/share/glib-2.0/schemas
+          # GTK will not start without its compiled settings schemas, and reads
+          # image formats through gdk-pixbuf's loader modules — without those,
+          # inline images are blank.
+          mkdir -p stage/share/glib-2.0/schemas
+          cp /mingw64/share/glib-2.0/schemas/*.xml stage/share/glib-2.0/schemas/ 2>/dev/null || true
+          glib-compile-schemas stage/share/glib-2.0/schemas
           if [ -d /mingw64/lib/gdk-pixbuf-2.0 ]; then
-            cp -r /mingw64/lib/gdk-pixbuf-2.0 dist/scully/lib-gdk-pixbuf
+            cp -r /mingw64/lib/gdk-pixbuf-2.0 stage/lib/
           fi
 
-          cp README.md dist/scully/ 2>/dev/null || true
-          cat > dist/scully/RUN.txt <<'EOF'
-          Run scully.exe. The GTK runtime is included in this folder — keep the
-          DLLs and the share/ directory next to the executable.
+          cat > scully.nsi <<EOF
+          !include "MUI2.nsh"
+          Name "Scully"
+          OutFile "scully-${V}-windows-x64-setup.exe"
+          Unicode True
+          InstallDir "\$LOCALAPPDATA\\Scully"
+          RequestExecutionLevel user
+          !insertmacro MUI_PAGE_DIRECTORY
+          !insertmacro MUI_PAGE_INSTFILES
+          !insertmacro MUI_UNPAGE_CONFIRM
+          !insertmacro MUI_UNPAGE_INSTFILES
+          !insertmacro MUI_LANGUAGE "English"
+          Section "Install"
+            SetOutPath "\$INSTDIR"
+            File /r "stage\\*.*"
+            CreateShortcut "\$SMPROGRAMS\\Scully.lnk" "\$INSTDIR\\scully.exe"
+            CreateShortcut "\$DESKTOP\\Scully.lnk" "\$INSTDIR\\scully.exe"
+            WriteUninstaller "\$INSTDIR\\uninstall.exe"
+            WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Scully" \\
+              "DisplayName" "Scully"
+            WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Scully" \\
+              "UninstallString" "\$INSTDIR\\uninstall.exe"
+            WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Scully" \\
+              "DisplayVersion" "${V}"
+          SectionEnd
+          Section "Uninstall"
+            Delete "\$SMPROGRAMS\\Scully.lnk"
+            Delete "\$DESKTOP\\Scully.lnk"
+            RMDir /r "\$INSTDIR"
+            DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Scully"
+          SectionEnd
           EOF
-          cd dist && zip -qr ../scully-windows-x86_64.zip scully
+          makensis scully.nsi
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: scully-windows-x86_64.zip
+          path: '*-setup.exe'
 
   release:
-    needs: [linux, linux-arm64, macos, windows]
+    needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
