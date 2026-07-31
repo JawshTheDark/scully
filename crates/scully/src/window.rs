@@ -1400,6 +1400,30 @@ impl ChatWindow {
         self.rebuilding.set(true);
         clear_list(&self.buffer_list);
         let mut rows = Vec::new();
+
+        // An empty sidebar is ambiguous: still starting up, or an account with
+        // nothing in it? Say which, rather than leaving a blank column that
+        // reads as breakage.
+        if sections.is_empty() {
+            let msg = match &*self.app.conn.borrow() {
+                lurker_client::ConnState::Connecting => "connecting…",
+                lurker_client::ConnState::Backoff(_) => "reconnecting…",
+                lurker_client::ConnState::Failed(_) => "not connected",
+                _ => "no conversations yet",
+            };
+            let row = gtk::ListBoxRow::builder()
+                .child(
+                    &gtk::Label::builder()
+                        .label(msg)
+                        .xalign(0.0)
+                        .css_classes(["network-header"])
+                        .build(),
+                )
+                .selectable(false)
+                .activatable(false)
+                .build();
+            self.buffer_list.append(&row);
+        }
         let mut select_index: Option<i32> = None;
 
         for section in sections {

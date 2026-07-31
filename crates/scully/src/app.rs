@@ -226,6 +226,13 @@ impl App {
     pub fn start_session(self: &AppRef, rest: Rest) {
         *self.rest.borrow_mut() = Some(rest.clone());
 
+        // Say we are connecting, immediately. The roster fetch and the socket
+        // both take a moment, and until now the window sat there with an empty
+        // sidebar reading "disconnected" — which is exactly what a genuine
+        // failure looks like, so startup was indistinguishable from breakage.
+        *self.conn.borrow_mut() = ConnState::Connecting;
+        self.notify(&[StoreEvent::BufferListChanged]);
+
         // Instance capabilities, on EVERY session start. Doing this only on the
         // password-login path left `voiceEnabled` false forever for anyone
         // resuming a stored token — which is the normal startup — so the call
