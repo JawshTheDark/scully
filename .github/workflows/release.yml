@@ -302,6 +302,9 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: Scully ${{ github.event.inputs.tag || github.ref_name }}
-          draft: true
+          # Published outright, not drafted. A release nobody publishes is an
+          # invisible release, and this repo cuts frequent point releases.
+          draft: false
+          make_latest: true
           generate_release_notes: true
           files: artifacts/**/*
