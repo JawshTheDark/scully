@@ -738,6 +738,76 @@ impl App {
         );
     }
 
+    /// Connect, disconnect or reconnect a network.
+    ///
+    /// The bouncer owns the IRC connection, so this is account-wide: taking a
+    /// network down here takes it down for every device. `report` gets the
+    /// outcome for the status line.
+    pub fn network_action(
+        self: &AppRef,
+        id: i64,
+        action: &'static str,
+        report: impl Fn(Result<(), String>) + 'static,
+    ) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        self.spawn_async(
+            async move { rest.network_action(id, action).await },
+            move |res| report(res.map_err(|e| e.to_string())),
+        );
+    }
+
+    /// Remove a network entirely, along with its buffers.
+    pub fn delete_network(
+        self: &AppRef,
+        id: i64,
+        report: impl Fn(Result<(), String>) + 'static,
+    ) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        self.spawn_async(
+            async move { rest.delete_network(id).await },
+            move |res| report(res.map_err(|e| e.to_string())),
+        );
+    }
+
+    /// Add a network. `fields` is the server's own snake_case form payload.
+    /// On success the roster is refetched so the new network appears without a
+    /// reconnect.
+    pub fn create_network(
+        self: &AppRef,
+        fields: serde_json::Value,
+        report: impl Fn(Result<(), String>) + 'static,
+    ) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        let app = self.clone();
+        self.spawn_async(
+            async move { rest.create_network(fields).await },
+            move |res| match res {
+                Ok(_) => {
+                    app.refresh_networks();
+                    report(Ok(()));
+                }
+                Err(e) => report(Err(e.to_string())),
+            },
+        );
+    }
+
+    /// Re-read the network roster into the store (after an add or removal).
+    pub fn refresh_networks(self: &AppRef) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        let app = self.clone();
+        self.spawn_async(
+            async move { rest.networks().await },
+            move |res| {
+                if let Ok(rows) = res {
+                    app.store
+                        .borrow_mut()
+                        .set_network_roster(rows.into_iter().map(|n| (n.id, n.name, n.host)));
+                    app.notify(&[StoreEvent::BufferListChanged]);
+                }
+            },
+        );
+    }
+
     /// Explicit user intent to open a buffer — the one place `open-buffer` is
     /// correct, because it is a write with side effects on every device.
     pub fn open_buffer(self: &AppRef, key: &BufferKey) {

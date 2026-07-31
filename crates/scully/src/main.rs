@@ -20,6 +20,7 @@ mod input;
 mod login;
 mod media;
 mod modelist;
+mod networkdialog;
 mod nickmenu;
 mod paths;
 mod settings;

@@ -47,6 +47,7 @@ pub struct ChatWindow {
     topic_label: gtk::Label,
     status_label: gtk::Label,
     member_count: gtk::Label,
+    btn_addnet: gtk::Button,
     btn_search: gtk::Button,
     btn_popout: gtk::Button,
     btn_read: gtk::Button,
@@ -228,6 +229,7 @@ impl ChatWindow {
                 .valign(gtk::Align::Center)
                 .build()
         };
+        let btn_addnet = tool("+", "Add a network");
         let btn_search = tool("⌕", "Search messages (Ctrl+F)");
         let btn_popout = tool("⬈", "Pop this channel out into its own window");
         let btn_read = tool("✓", "Mark everything read");
@@ -237,6 +239,7 @@ impl ChatWindow {
         btn_call.set_visible(false);
         // The tools sit in the sidebar header (see above). A popout has no
         // sidebar, so it simply has no toolbar — which it already didn't.
+        sidebar_header.append(&btn_addnet);
         sidebar_header.append(&btn_search);
         sidebar_header.append(&btn_call);
         sidebar_header.append(&btn_popout);
@@ -354,6 +357,7 @@ impl ChatWindow {
             call_panel,
             call_status,
             call_button,
+            btn_addnet,
             btn_search,
             btn_popout,
             btn_read,
@@ -893,6 +897,10 @@ impl ChatWindow {
         self.btn_settings.connect_clicked(move |_| {
             crate::settings::SettingsWindow::open(&this.app);
         });
+        let this = self.clone();
+        self.btn_addnet.connect_clicked(move |_| {
+            crate::networkdialog::open(&this.app, this.window.clone().upcast_ref());
+        });
 
         // Voice call: toolbar button and the nicklist panel's join button both
         // route through try_start_call, which reports precisely why nothing
@@ -1225,6 +1233,9 @@ impl ChatWindow {
             /// out of its network otherwise loses the only thing that says
             /// which `amiantos` this is.
             cross_network: bool,
+            /// The network this section IS, when it is one. Only these headers
+            /// offer connect/disconnect.
+            network_id: Option<i64>,
         }
         let mut sections: Vec<Section> = Vec::new();
         let sort_key = |k: &BufferKey| (k.is_dm(), k.is_dcc(), k.target.clone());
@@ -1233,7 +1244,7 @@ impl ChatWindow {
         let system: Vec<BufferKey> =
             store.buffers.keys().filter(|k| k.network_id.is_none()).cloned().collect();
         if !system.is_empty() {
-            sections.push(Section { header: None, offline: false, keys: system, cross_network: false });
+            sections.push(Section { header: None, offline: false, keys: system, cross_network: false, network_id: None });
         }
 
         // Pinned — across all networks, any buffer kind.
@@ -1250,6 +1261,7 @@ impl ChatWindow {
                 offline: false,
                 keys: pinned,
                 cross_network: true,
+                network_id: None,
             });
         }
 
@@ -1269,6 +1281,7 @@ impl ChatWindow {
                 offline: false,
                 keys: dms,
                 cross_network: true,
+                network_id: None,
             });
         }
 
@@ -1296,6 +1309,7 @@ impl ChatWindow {
                 offline: net.state != lurker_proto::NetworkState::Connected,
                 keys,
                 cross_network: false,
+                network_id: Some(*id),
             });
         }
 
@@ -1313,6 +1327,7 @@ impl ChatWindow {
                 offline: false,
                 keys: dcc,
                 cross_network: true,
+                network_id: None,
             });
         }
 
@@ -1393,6 +1408,7 @@ impl ChatWindow {
                 // to work out which section was hit.
                 let click = gtk::GestureClick::builder().button(1).build();
                 let weak = self.clone_handle();
+                let net_title = title.clone();
                 let title = title.clone();
                 click.connect_pressed(move |gesture, _, _, _| {
                     let Some(this) = weak.upgrade() else { return };
@@ -1415,6 +1431,23 @@ impl ChatWindow {
                     });
                 });
                 row.add_controller(click);
+
+                // Right-click a NETWORK header: bring it up or down, or remove
+                // it. Only real networks — the cross-network sections have no
+                // single connection to act on.
+                if let Some(net_id) = section.network_id {
+                    let right = gtk::GestureClick::builder().button(3).build();
+                    let weak = self.clone_handle();
+                    let offline = section.offline;
+                    let net_name = net_title.clone();
+                    right.connect_pressed(move |gesture, _, x, y| {
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
+                        if let Some(this) = weak.upgrade() {
+                            this.open_network_menu(net_id, &net_name, offline, x as i32, y as i32);
+                        }
+                    });
+                    row.add_controller(right);
+                }
 
                 self.buffer_list.append(&row);
                 // A non-selectable header still occupies a ListBox index, so
@@ -2299,6 +2332,119 @@ impl ChatWindow {
         *self.menu_buffer.borrow_mut() = Some(key);
         popover.popup();
         *self.buffer_menu.borrow_mut() = Some(popover);
+    }
+
+    /// Context menu for a network header: connect / disconnect / reconnect,
+    /// add another, or remove this one.
+    ///
+    /// These act on the *bouncer's* connection, so they reach every device on
+    /// the account — which is why removal asks first.
+    fn open_network_menu(
+        self: &Rc<Self>,
+        net_id: i64,
+        net_name: &str,
+        offline: bool,
+        x: i32,
+        y: i32,
+    ) {
+        if let Some(old) = self.buffer_menu.borrow_mut().take() {
+            old.unparent();
+        }
+
+        let model = gio::Menu::new();
+        let conn = gio::Menu::new();
+        if offline {
+            conn.append_item(&gio::MenuItem::new(Some("Connect"), Some("net.cmd::connect")));
+        } else {
+            conn.append_item(&gio::MenuItem::new(Some("Disconnect"), Some("net.cmd::disconnect")));
+            conn.append_item(&gio::MenuItem::new(Some("Reconnect"), Some("net.cmd::reconnect")));
+        }
+        model.append_section(None, &conn);
+        let manage = gio::Menu::new();
+        manage.append_item(&gio::MenuItem::new(Some("Add a network…"), Some("net.cmd::add")));
+        manage.append_item(&gio::MenuItem::new(
+            Some("Remove this network…"),
+            Some("net.cmd::remove"),
+        ));
+        model.append_section(None, &manage);
+
+        let this = self.clone();
+        let name = net_name.to_string();
+        let group = gio::SimpleActionGroup::new();
+        let action = gio::SimpleAction::new("cmd", Some(glib::VariantTy::STRING));
+        action.connect_activate(move |_, param| {
+            let Some(id) = param.and_then(|p| p.get::<String>()) else { return };
+            this.run_network_command(net_id, &name, &id);
+        });
+        group.add_action(&action);
+
+        let popover = gtk::PopoverMenu::from_model(Some(&model));
+        popover.insert_action_group("net", Some(&group));
+        let (px, py) = self
+            .buffer_list
+            .compute_point(&self.buffer_pane, &gtk::graphene::Point::new(x as f32, y as f32))
+            .map(|p| (p.x() as i32, p.y() as i32))
+            .unwrap_or((x, y));
+        popover.set_parent(&self.buffer_pane);
+        popover.set_has_arrow(false);
+        popover.set_halign(gtk::Align::Start);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(px, py, 1, 1)));
+        popover.popup();
+        *self.buffer_menu.borrow_mut() = Some(popover);
+    }
+
+    fn run_network_command(self: &Rc<Self>, net_id: i64, net_name: &str, id: &str) {
+        let status = self.status_label.clone();
+        match id {
+            "connect" | "disconnect" | "reconnect" => {
+                let action: &'static str = match id {
+                    "connect" => "connect",
+                    "disconnect" => "disconnect",
+                    _ => "reconnect",
+                };
+                let name = net_name.to_string();
+                status.set_text(&format!("{action}ing {name}…"));
+                let done = status.clone();
+                self.app.network_action(net_id, action, move |res| match res {
+                    Ok(()) => done.set_text(&format!("{name}: {action} requested")),
+                    Err(e) => done.set_text(&format!("{action} failed — {e}")),
+                });
+            }
+            "add" => crate::networkdialog::open(&self.app, self.window.clone().upcast_ref()),
+            "remove" => {
+                // Destructive and account-wide: confirm, and name the network so
+                // there is no doubt which one is about to go.
+                let dialog = gtk::AlertDialog::builder()
+                    .message(format!("Remove {net_name}?"))
+                    .detail(
+                        "This deletes the network and its buffers for every device on your \
+                         account. It cannot be undone.",
+                    )
+                    .buttons(["Cancel", "Remove"])
+                    .cancel_button(0)
+                    .default_button(0)
+                    .build();
+                let app = self.app.clone();
+                let status = status.clone();
+                let name = net_name.to_string();
+                dialog.choose(
+                    Some(&self.window),
+                    gtk::gio::Cancellable::NONE,
+                    move |answer| {
+                        if answer.ok() != Some(1) {
+                            return;
+                        }
+                        let status = status.clone();
+                        let name = name.clone();
+                        app.delete_network(net_id, move |res| match res {
+                            Ok(()) => status.set_text(&format!("{name} removed")),
+                            Err(e) => status.set_text(&format!("could not remove — {e}")),
+                        });
+                    },
+                );
+            }
+            _ => {}
+        }
     }
 
     /// Dispatch a buffer-menu id against the buffer the menu was opened on.

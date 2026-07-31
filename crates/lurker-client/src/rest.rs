@@ -95,6 +95,11 @@ pub struct NetworkRow {
 }
 
 #[derive(Deserialize)]
+struct NetworkEnvelope {
+    network: NetworkRow,
+}
+
+#[derive(Deserialize)]
 struct NetworksEnvelope {
     #[serde(default)]
     networks: Vec<NetworkRow>,
@@ -477,6 +482,41 @@ impl Rest {
             .await?;
         let env: VoicePolicy = Self::check(resp).await?.json().await?;
         Ok(env.min_join_mode)
+    }
+
+    /// `POST /api/networks` — add a network. `fields` mirrors the server's own
+    /// form: `name`, `host` and `nick` are required; `port`, `tls`, `username`,
+    /// `realname`, `server_password`, `sasl_account`, `sasl_password`,
+    /// `autoconnect`, `default_channel` and `connect_commands` are optional.
+    /// Note the snake_case: this route predates the camelCase WS frames.
+    pub async fn create_network(&self, fields: serde_json::Value) -> Result<NetworkRow> {
+        let resp = self
+            .authed(self.http.post(self.url("api/networks")?))
+            .json(&fields)
+            .send()
+            .await?;
+        let env: NetworkEnvelope = Self::check(resp).await?.json().await?;
+        Ok(env.network)
+    }
+
+    /// `POST /api/networks/:id/{connect,disconnect,reconnect}` — bring a
+    /// network up or down. The bouncer holds the IRC connection, so this
+    /// affects every device on the account, not just this client.
+    pub async fn network_action(&self, id: i64, action: &str) -> Result<()> {
+        let resp = self
+            .authed(self.http.post(self.url(&format!("api/networks/{id}/{action}"))?))
+            .send()
+            .await?;
+        Self::check(resp).await?;
+        Ok(())
+    }
+
+    /// `DELETE /api/networks/:id` — remove a network and its buffers.
+    pub async fn delete_network(&self, id: i64) -> Result<()> {
+        let resp =
+            self.authed(self.http.delete(self.url(&format!("api/networks/{id}"))?)).send().await?;
+        Self::check(resp).await?;
+        Ok(())
     }
 
     /// `POST /api/auth/logout` — deletes this session row (per-device revoke on
