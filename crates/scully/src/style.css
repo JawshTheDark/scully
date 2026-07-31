@@ -384,3 +384,11 @@ row.buffer-row.dcc label {
   color: @fg;
   padding: 2px 8px;
 }
+
+/* Placeholder shown in place of an inline image while it loads, or when it
+   failed — silence made a slow host look identical to a broken link. */
+.embed-note {
+  color: @fg_muted;
+  font-size: 90%;
+  font-style: italic;
+}

@@ -891,7 +891,26 @@ impl ChatWindow {
         shortcuts.connect_key_pressed(move |_, key, _, state| {
             let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
+
+            // Alt+1…Alt+9 jumps to the Nth buffer, counting what a person can
+            // see rather than what the list contains (section headers occupy
+            // rows too).
+            if alt {
+                if let Some(digit) = key.to_unicode().and_then(|c| c.to_digit(10)) {
+                    if digit >= 1 {
+                        this.jump_to_nth(digit as usize);
+                        return glib::Propagation::Stop;
+                    }
+                }
+            }
+
             match key {
+                // Alt+A: the next buffer that wants you, highlights first.
+                gtk::gdk::Key::a | gtk::gdk::Key::A if alt => {
+                    this.jump_to_attention();
+                    glib::Propagation::Stop
+                }
                 gtk::gdk::Key::f | gtk::gdk::Key::F if ctrl => {
                     this.open_search(shift);
                     glib::Propagation::Stop
@@ -1970,6 +1989,68 @@ impl ChatWindow {
         self.app.mark_read(&key, newest);
     }
 
+    /// A snapshot of the sidebar's activity, index-aligned with `rows`.
+    fn activity_rows(&self) -> Vec<crate::attention::Activity> {
+        let store = self.app.store.borrow();
+        let rows = self.rows.borrow();
+        rows.iter()
+            .enumerate()
+            .map(|(i, key)| {
+                // Header placeholders reuse the system key; the real system
+                // buffer is only ever at a row that the list actually selected.
+                let is_header = self
+                    .buffer_list
+                    .row_at_index(i as i32)
+                    .is_some_and(|r| !r.is_selectable());
+                match store.buffer(key) {
+                    Some(b) if !is_header => crate::attention::Activity {
+                        unread: b.unread,
+                        highlights: b.highlights,
+                        selectable: true,
+                    },
+                    // A row with no buffer yet (a shell) is still somewhere the
+                    // user can go, it just has nothing waiting.
+                    _ => crate::attention::Activity {
+                        selectable: !is_header,
+                        ..crate::attention::Activity::none()
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Jump to the next buffer with unread activity (Alt+A), preferring
+    /// highlights. Says so in the status line when there is nothing to go to,
+    /// rather than appearing to do nothing.
+    fn jump_to_attention(self: &Rc<Self>) {
+        let rows = self.activity_rows();
+        let current = self
+            .active
+            .borrow()
+            .as_ref()
+            .and_then(|k| self.rows.borrow().iter().position(|r| r == k));
+        match crate::attention::next_attention(&rows, current) {
+            Some(idx) => {
+                let key = self.rows.borrow().get(idx).cloned();
+                if let Some(key) = key {
+                    self.activate(&key);
+                }
+            }
+            None => self.status_label.set_text("nothing unread"),
+        }
+    }
+
+    /// Jump to the Nth buffer in the sidebar (Alt+1…Alt+9).
+    fn jump_to_nth(self: &Rc<Self>, nth: usize) {
+        let rows = self.activity_rows();
+        if let Some(idx) = crate::attention::nth_selectable(&rows, nth) {
+            let key = self.rows.borrow().get(idx).cloned();
+            if let Some(key) = key {
+                self.activate(&key);
+            }
+        }
+    }
+
     /// Show or hide the voice-call affordances and refresh their labels.
     ///
     /// Called whenever anything they depend on moves: the `voiceEnabled`
@@ -2357,10 +2438,41 @@ impl ChatWindow {
                             Some(picture.upcast())
                         }
                         None => {
-                            if !self.app.images.is_failed(&url) {
+                            // No texture yet: say why. Silence here is what
+                            // made a slow host (11s is normal for some image
+                            // hosts) indistinguishable from a broken link.
+                            let failed = self.app.images.is_failed(&url);
+                            if !failed {
                                 self.app.fetch_image(url.clone(), key.clone());
                             }
-                            None
+                            let note = gtk::Label::builder()
+                                .xalign(0.0)
+                                .label(if failed {
+                                    "\u{26A0} image could not be loaded — click to retry"
+                                } else {
+                                    "\u{2026} loading image"
+                                })
+                                .css_classes(["embed-note"])
+                                .build();
+                            if failed {
+                                // Retry on click: a failure is usually the host
+                                // being slow or briefly unreachable, and being
+                                // stuck with it until restart is worse.
+                                note.set_cursor_from_name(Some("pointer"));
+                                let click = gtk::GestureClick::builder().button(1).build();
+                                let weak = self.clone_handle();
+                                let retry_url = url.clone();
+                                let wake = key.clone();
+                                click.connect_released(move |_, _, _, _| {
+                                    let Some(this) = weak.upgrade() else { return };
+                                    this.app.images.clear_failure(&retry_url);
+                                    this.app.fetch_image(retry_url.clone(), wake.clone());
+                                    *this.drawn.borrow_mut() = Drawn::default();
+                                    this.render_active();
+                                });
+                                note.add_controller(click);
+                            }
+                            Some(note.upcast())
                         }
                     }
                 }
@@ -2961,13 +3073,30 @@ impl ChatWindow {
                 self.open_search(false);
                 return true;
             }
+            // Rendered into the buffer, not the status line: 75 command names
+            // do not fit on one line, so the status version simply truncated
+            // and told you nothing.
             ("help", _) => {
                 let mut names: Vec<&str> = crate::commands::KNOWN.to_vec();
                 names.sort_unstable();
-                self.status_label.set_text(&format!(
-                    "/{}  — anything else is sent as a raw IRC line",
-                    names.join(" /")
-                ));
+                let mut lines = vec![format!("{} commands:", names.len())];
+                // Six to a line, padded into columns so it reads as a table
+                // rather than a paragraph.
+                for chunk in names.chunks(6) {
+                    lines.push(
+                        chunk
+                            .iter()
+                            .map(|n| format!("/{n:<14}"))
+                            .collect::<String>()
+                            .trim_end()
+                            .to_string(),
+                    );
+                }
+                lines.push(String::new());
+                lines.push("anything else is sent as a raw IRC line".to_string());
+                self.app.store.borrow_mut().inject_lines(key, "help", lines);
+                *self.drawn.borrow_mut() = Drawn::default();
+                self.render_active();
                 return true;
             }
             // The command table: mode shortcuts, kick/ban, services, text

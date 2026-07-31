@@ -248,6 +248,17 @@ impl ImageCache {
         }
     }
 
+    /// Whether a fetch for this url is in flight, so the renderer can say
+    /// "loading" instead of showing nothing at all.
+    pub fn is_loading(&self, url: &str) -> bool {
+        self.inflight.borrow().contains(url)
+    }
+
+    /// Forget a failure so the next render retries it.
+    pub fn clear_failure(&self, url: &str) {
+        self.failed.borrow_mut().remove(url);
+    }
+
     pub fn fail(&self, url: &str) {
         self.inflight.borrow_mut().remove(url);
         self.failed.borrow_mut().insert(url.to_string());
