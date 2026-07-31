@@ -525,3 +525,22 @@ row.buffer-row.dcc label {
 .chanlist-name {
   color: @accent;
 }
+
+/* Composer row: the attach button sits flush against the entry, which spans
+   the rest of the width. */
+.composer-row {
+  background-color: @bg;
+  border-top: 1px solid @border;
+  padding: 0 4px;
+}
+
+.composer-row .composer {
+  border-top: none;
+}
+
+button.toolbtn.attach {
+  min-width: 34px;
+  min-height: 34px;
+  border: none;
+  font-size: 12pt;
+}

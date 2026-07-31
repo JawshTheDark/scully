@@ -64,6 +64,7 @@ pub struct ChatWindow {
     members_header: gtk::Box,
     btn_members_back: gtk::Button,
     btn_members: gtk::Button,
+    btn_attach: gtk::Button,
     btn_back: gtk::Button,
     /// Narrow (phone) layout: one pane at a time instead of three side by
     /// side. Driven purely by window width, so it works on a Linux phone
@@ -308,7 +309,21 @@ impl ChatWindow {
         centre.append(&header);
         centre.append(&scroller);
         centre.append(&status_label);
-        centre.append(&entry);
+        // Composer row. The attach button matters most on a phone, where there
+        // is no drag-and-drop and the clipboard only helps for something you
+        // already copied — but it is the obvious affordance on a desktop too,
+        // so it is not gated on the narrow layout.
+        let btn_attach = gtk::Button::builder()
+            .label("\u{1F4CE}")
+            .tooltip_text("Attach a file or image")
+            .css_classes(["toolbtn", "attach"])
+            .valign(gtk::Align::Center)
+            .build();
+        let composer_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        composer_row.add_css_class("composer-row");
+        composer_row.append(&btn_attach);
+        composer_row.append(&entry);
+        centre.append(&composer_row);
         let centre_pane = centre.clone();
 
         // ── Right: nicklist ──
@@ -427,6 +442,7 @@ impl ChatWindow {
             members_header,
             btn_members_back,
             btn_members,
+            btn_attach,
             btn_back,
             narrow: Cell::new(false),
             narrow_showing_list: Cell::new(true),
@@ -1075,6 +1091,8 @@ impl ChatWindow {
         self.btn_back.connect_clicked(move |_| this.narrow_show_list());
         let this = self.clone();
         self.btn_members.connect_clicked(move |_| this.narrow_toggle_members());
+        let this = self.clone();
+        self.btn_attach.connect_clicked(move |_| this.pick_and_upload());
         let this = self.clone();
         self.btn_members_back.connect_clicked(move |_| this.narrow_show_list());
 
@@ -3367,6 +3385,38 @@ impl ChatWindow {
     /// Upload pasted or dropped content and paste the resulting link at the
     /// cursor. This is the Lurker upload pipeline (§10) — the server
     /// optimises, hosts, and records it in the account's upload history.
+    /// Choose a file and upload it, inserting the resulting link.
+    ///
+    /// The same destination as paste and drag-and-drop; only the way you name
+    /// the file differs. On a phone this is the ONLY way in — there is nothing
+    /// to drag from, and the clipboard only carries what you already copied.
+    fn pick_and_upload(self: &Rc<Self>) {
+        let dialog = gtk::FileDialog::builder().title("Attach a file").modal(true).build();
+        let this = self.clone();
+        dialog.open(Some(&self.window), gtk::gio::Cancellable::NONE, move |result| {
+            let Ok(file) = result else { return }; // cancelled
+            let name = file
+                .basename()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "upload".to_string());
+            // Read on the GTK thread: the picker has already made the user
+            // wait, and the upload itself is what takes the time.
+            let bytes = match file.path().and_then(|p| std::fs::read(p).ok()) {
+                Some(b) => b,
+                None => {
+                    this.status_label.set_text("could not read that file");
+                    return;
+                }
+            };
+            // Content type from the name, since the portal does not always
+            // give one. The server validates the real type regardless.
+            let mime = gtk::gio::content_type_guess(Some(&name), Some(bytes.as_slice()))
+                .0
+                .to_string();
+            this.upload_and_insert(name, mime, bytes);
+        });
+    }
+
     fn upload_and_insert(self: &Rc<Self>, filename: String, mime: String, bytes: Vec<u8>) {
         self.status_label
             .set_text(&format!("uploading {filename} ({} KB)…", bytes.len() / 1024));
