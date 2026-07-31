@@ -2509,28 +2509,13 @@ impl ChatWindow {
 
         let count = key.map(|k| self.app.store.borrow().call_count(&k)).unwrap_or(0);
 
-        // A build without the `voice` feature has no media engine, so joining
-        // is impossible however willing the server is. Report a call that is
-        // happening — that information is real and comes from the server — but
-        // do not offer a button that cannot do anything. Offering it and then
-        // explaining the failure in a status bar is worse than not offering it,
-        // and on a phone that status bar is not even on screen.
-        let can_join = cfg!(feature = "voice");
-        self.call_button.set_visible(can_join);
-        self.btn_call.set_visible(can_join && self.app.voice_enabled.get());
-
+        self.call_button.set_visible(true);
         if count > 0 {
             self.call_status.set_text(&format!("\u{1F4DE} Call in progress — {count} in call"));
             self.call_button.set_label("Join call");
-        } else if can_join {
+        } else {
             self.call_status.set_text("No voice call here yet");
             self.call_button.set_label("Start call");
-        } else {
-            self.call_status.set_text("");
-        }
-        // With no call and no way to start one there is nothing to show at all.
-        if !can_join && count == 0 {
-            self.call_panel.set_visible(false);
         }
     }
 
