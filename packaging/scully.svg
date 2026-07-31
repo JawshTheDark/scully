@@ -1,18 +1,50 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <!-- Scully's icon: a terminal-dark tile with a chat caret and a torch beam.
-       Palette is Lurker's own (bg #212022, accent #a99dec, warn #f9d978), so the
-       launcher entry matches the app it opens. -->
+  <!-- Scully's icon: an abduction, for the obvious reason.
+       Drawn from scratch rather than adapted from a stock icon, so there is no
+       attribution or licence to carry. Palette is Lurker's own (bg #212022,
+       accent #a99dec, warn #f9d978, halfop #78dce8) so the launcher entry
+       matches the app it opens.
+       Shapes are deliberately few and bold: a launcher renders this at 48px,
+       where fine detail turns to mud. -->
+  <defs>
+    <linearGradient id="beam" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#f9d978" stop-opacity="0.85"/>
+      <stop offset="55%"  stop-color="#f9d978" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#f9d978" stop-opacity="0.05"/>
+    </linearGradient>
+    <clipPath id="tile">
+      <rect width="256" height="256" rx="52"/>
+    </clipPath>
+  </defs>
+
   <rect width="256" height="256" rx="52" fill="#212022"/>
-  <rect x="4" y="4" width="248" height="248" rx="48" fill="none" stroke="#3a383c" stroke-width="4"/>
 
-  <!-- Torch beam: the one at the desk who wants evidence. -->
-  <path d="M128 54 L196 186 A76 76 0 0 1 60 186 Z" fill="#a99dec" opacity="0.10"/>
+  <g clip-path="url(#tile)">
+    <!-- The beam, cast from under the hull and spreading to the ground. -->
+    <path d="M96 108 L160 108 L212 246 L44 246 Z" fill="url(#beam)"/>
 
-  <!-- Speech caret, the app's actual job. -->
-  <path d="M64 84 h128 a16 16 0 0 1 16 16 v56 a16 16 0 0 1 -16 16 h-52 l-28 26 v-26 h-48
-           a16 16 0 0 1 -16 -16 v-56 a16 16 0 0 1 16 -16 z"
-        fill="none" stroke="#a99dec" stroke-width="10" stroke-linejoin="round"/>
+    <!-- The abductee: arms up, legs apart, tilted as though lifted. The limbs
+         are separated by real gaps — at 48px anything closer than a few pixels
+         merges into one blob and the figure stops reading as a person. -->
+    <g transform="rotate(-12 128 190)" fill="#212022" opacity="0.95">
+      <circle cx="128" cy="156" r="12"/>
+      <rect x="120" y="171" width="16" height="30" rx="8"/>
+      <!-- arms, raised -->
+      <rect x="99"  y="164" width="9" height="30" rx="4.5" transform="rotate(-32 103 179)"/>
+      <rect x="148" y="164" width="9" height="30" rx="4.5" transform="rotate(32 152 179)"/>
+      <!-- legs, apart -->
+      <rect x="115" y="203" width="8" height="26" rx="4" transform="rotate(-10 119 216)"/>
+      <rect x="133" y="203" width="8" height="26" rx="4" transform="rotate(10 137 216)"/>
+    </g>
 
-  <!-- Unread pip, in the highlight colour. -->
-  <circle cx="186" cy="92" r="18" fill="#f9d978"/>
+    <!-- Saucer: dome, then hull over it so the seam reads cleanly. -->
+    <path d="M96 84 a32 30 0 0 1 64 0 z" fill="#78dce8"/>
+    <ellipse cx="128" cy="88" rx="74" ry="20" fill="#a99dec"/>
+    <ellipse cx="128" cy="82" rx="74" ry="14" fill="#c3bbf2"/>
+
+    <!-- Running lights. -->
+    <circle cx="78"  cy="90" r="6" fill="#f9d978"/>
+    <circle cx="128" cy="94" r="6" fill="#f9d978"/>
+    <circle cx="178" cy="90" r="6" fill="#f9d978"/>
+  </g>
 </svg>
