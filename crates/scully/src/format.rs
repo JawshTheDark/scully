@@ -71,6 +71,13 @@ pub struct Line {
     pub nick_tag: Option<String>,
     pub text: String,
     pub kind: LineKind,
+    /// The speaker, when this row is something a *person said* and should
+    /// therefore group under a nick heading. `None` for joins, modes, server
+    /// notices and the like, which stand alone.
+    ///
+    /// Kept separate from `nick` because that field is the row's left-column
+    /// marker (`-->`, `--`, `*`), which is not the same thing as authorship.
+    pub author: Option<String>,
 }
 
 /// Fallback nick palette, used until `look.nick.colors` loads (and when it is
@@ -175,6 +182,7 @@ fn format_time(raw: Option<&str>, strftime: &str) -> String {
 /// changes the density of the buffer without changing its visual vocabulary.
 pub fn summary_line(summary: &lurker_proto::consolidate::Summary, strftime: &str) -> Line {
     Line {
+        author: None,
         time: format_time(summary.time.as_deref(), strftime),
         nick: pad_nick("--"),
         nick_tag: Some("nick-plain".to_string()),
@@ -279,6 +287,10 @@ pub fn line_for(event: &MessageEvent, strftime: &str, palette_len: usize) -> Opt
     };
 
     Some(Line {
+        author: match event.event_type {
+            EventType::Message | EventType::Action => event.nick.clone(),
+            _ => None,
+        },
         time,
         nick: nick_col,
         nick_tag: colored

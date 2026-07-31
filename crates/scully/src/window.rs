@@ -113,6 +113,10 @@ pub struct ChatWindow {
     completion: RefCell<Option<(i32, Vec<String>, usize)>>,
     /// Last outbound typing signal, to throttle the TAGMSGs.
     typing_sent: Cell<Option<std::time::Instant>>,
+    /// The speaker of the row most recently appended, so a run of messages
+    /// from one person prints the nick once. Cleared on any full redraw and by
+    /// any non-speech row.
+    last_author: RefCell<Option<String>>,
     /// Cached nick palette length, so renders don't re-read settings per line.
     palette_len: Cell<usize>,
     /// Cached strftime timestamp format.
@@ -382,6 +386,7 @@ impl ChatWindow {
             history_stash: RefCell::new(String::new()),
             completion: RefCell::new(None),
             typing_sent: Cell::new(None),
+            last_author: RefCell::new(None),
             palette_len: Cell::new(format::DEFAULT_NICK_PALETTE.len()),
             time_fmt: RefCell::new("%H:%M:%S".to_string()),
             paging: Cell::new(false),
@@ -502,6 +507,9 @@ impl ChatWindow {
             .justification(gtk::Justification::Center)
             .build());
         add(gtk::TextTag::builder().name("time").foreground("#5a5a6e").build());
+        // Space above a speaker heading, so each turn in the conversation is
+        // visually separated instead of the log being one dense block.
+        add(gtk::TextTag::builder().name("author").pixels_above_lines(8).build());
         add(gtk::TextTag::builder().name("msg").foreground("#c9c9d4").build());
         add(gtk::TextTag::builder().name("msg-self").foreground("#9aa0b0").build());
         add(gtk::TextTag::builder().name("msg-highlight").foreground("#ffd479").weight(700).build(),
@@ -591,12 +599,25 @@ impl ChatWindow {
             return;
         }
 
-        let sample = " ".repeat(TEXT_COLUMN);
-        let layout = self.text_view.create_pango_layout(Some(&sample));
+        // Messages are indented two spaces under their author heading, so that
+        // is where wrapped lines should hang — not under an old fixed nick
+        // column.
+        let sample = "  ";
+        let layout = self.text_view.create_pango_layout(Some(sample));
         let (prefix_px, _) = layout.pixel_size();
 
         let max_indent = (width as f32 * Self::MAX_INDENT_FRACTION) as i32;
         let indent = prefix_px.clamp(0, max_indent.max(0));
+
+        // One right-aligned tab stop just inside the trailing edge: every row
+        // ends with "\t<time>", so timestamps line up flush right whatever the
+        // message length. Recomputed here because the stop is a pixel position
+        // and must follow the pane as it is resized.
+        let time_px = self.text_view.create_pango_layout(Some("00:00:00pm")).pixel_size().0;
+        let stop = (width - 10).max(time_px + 20);
+        let mut tabs = gtk::pango::TabArray::new(1, true);
+        tabs.set_tab(0, gtk::pango::TabAlign::Right, stop);
+        self.text_view.set_tabs(&tabs);
 
         // Pango's negative-indent semantics: the FIRST line stays at the
         // margin and *subsequent* (wrapped) lines are indented by `-indent`.
@@ -1657,12 +1678,14 @@ impl ChatWindow {
     fn render_active(&self) {
         let Some(key) = self.active.borrow().clone() else {
             self.clear_embeds();
+            *self.last_author.borrow_mut() = None;
             self.text.set_text("");
             return;
         };
         let store = self.app.store.borrow();
         let Some(buf) = store.buffer(&key) else {
             self.clear_embeds();
+            *self.last_author.borrow_mut() = None;
             self.text.set_text("");
             return;
         };
@@ -1747,6 +1770,7 @@ impl ChatWindow {
             prev.len
         } else {
             self.clear_embeds();
+            *self.last_author.borrow_mut() = None;
             self.text.set_text("");
             0
         };
@@ -1957,11 +1981,37 @@ impl ChatWindow {
         if self.text.char_count() > 0 {
             self.text.insert(&mut end, "\n");
         }
+        let row_start = self.text.end_iter().offset();
+        let _ = row_start;
 
-        self.insert_with_tags(&line.time, &["time"]);
-        self.insert_with_tags("  ", &["time"]);
-        self.insert_with_tags(&line.nick, &[line.nick_tag.as_deref().unwrap_or("nick-plain")]);
-        self.insert_with_tags("  ", &["time"]);
+        // Messages group under a nick heading, the way Lurker's own client
+        // shows them: the speaker once, then what they said indented beneath,
+        // so a run of lines from one person reads as one turn in the
+        // conversation rather than as N rows each restating who is talking.
+        match &line.author {
+            Some(author) => {
+                let same_speaker = self.last_author.borrow().as_deref() == Some(author.as_str());
+                if !same_speaker {
+                    self.insert_with_tags(
+                        author,
+                        &[line.nick_tag.as_deref().unwrap_or("nick-plain"), "author"],
+                    );
+                    self.text.insert(&mut self.text.end_iter(), "\n");
+                }
+                *self.last_author.borrow_mut() = Some(author.clone());
+                self.insert_with_tags("  ", &["time"]);
+            }
+            None => {
+                // Presence, modes, server text: standalone rows keep their
+                // marker column and break any run of speech above them.
+                *self.last_author.borrow_mut() = None;
+                self.insert_with_tags(line.nick.trim_start(), &[line
+                    .nick_tag
+                    .as_deref()
+                    .unwrap_or("nick-plain")]);
+                self.insert_with_tags(" ", &["time"]);
+            }
+        }
 
         // The message body carries IRC formatting codes inline. Parsing splits
         // it into styled runs and drops the control characters, which is what
@@ -1988,6 +2038,16 @@ impl ChatWindow {
                 let end = self.text.iter_at_offset(seg_start + b as i32);
                 self.text.apply_tag_by_name("link", &start, &end);
             }
+        }
+
+        // Timestamp last, behind a tab. The view carries a single right-aligned
+        // tab stop at its trailing edge (see apply_indent), so the time lands
+        // flush right regardless of how long the message was — the column stays
+        // readable without stealing width from the message the way a leading
+        // fixed column does.
+        if !line.time.trim().is_empty() {
+            self.insert_with_tags("\t", &["time"]);
+            self.insert_with_tags(line.time.trim(), &["time"]);
         }
     }
 
