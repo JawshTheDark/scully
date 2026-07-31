@@ -74,10 +74,17 @@ window {
   border: none;
 }
 
+/* The row that holds caret + dot + name. The vertical padding lives HERE, not
+   on the label: when the label carried it, the label's box was taller than the
+   dot's and asymmetric (10px above, 4px below), so the two could never be
+   centred against each other and the dot sat visibly high. */
+.section-header-row {
+  padding: 9px 10px 4px 8px;
+}
+
 .network-header {
   color: @fg_muted;
   font-weight: 700;
-  padding: 10px 10px 4px 10px;
   letter-spacing: 1px;
 }
 
@@ -88,8 +95,7 @@ window {
 /* The fold caret, sized on its own so the header text is unaffected. */
 .section-caret {
   color: @fg_muted;
-  font-size: 12pt;
-  padding: 10px 0 4px 0;
+  font-size: 13pt;
 }
 
 /* Connection dot beside a network name: green when the bouncer has that
@@ -97,7 +103,7 @@ window {
    colour, but a dot is readable at a glance without reading the word. */
 .net-dot {
   color: @good;
-  font-size: 11pt;
+  font-size: 13pt;
 }
 
 .net-dot.offline {

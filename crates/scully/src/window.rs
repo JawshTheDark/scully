@@ -1373,17 +1373,20 @@ impl ChatWindow {
                     store.buffer(k).map_or((u, h), |b| (u + b.unread, h + b.highlights))
                 });
 
-                let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+                header_box.add_css_class("section-header-row");
                 let caret = gtk::Label::builder()
                     .label(if folded { "▸" } else { "▾" })
                     // Its own class, not the header's: the caret is sized
                     // independently of the header text.
                     .css_classes(["section-caret"])
+                    .valign(gtk::Align::Center)
                     .build();
                 // Connection dot: readable at a glance without reading the name.
                 let dot = gtk::Label::builder()
                     .label("\u{25CF}")
                     .css_classes(["net-dot"])
+                    .valign(gtk::Align::Center)
                     .build();
                 if section.offline {
                     dot.add_css_class("offline");
@@ -1392,6 +1395,7 @@ impl ChatWindow {
                     .xalign(0.0)
                     .label(title)
                     .hexpand(true)
+                    .valign(gtk::Align::Center)
                     .css_classes(["network-header"])
                     .build();
                 if section.offline {
