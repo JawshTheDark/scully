@@ -94,13 +94,50 @@ pub fn nick_color_index(nick: &str, palette_len: usize) -> usize {
 
 /// Translate the registry's moment.js-style time format (`HH:mm:ss`) to the
 /// strftime tokens `glib::DateTime::format` understands. Unknown characters
-/// pass through, and literal `%` is escaped first so a stored value cannot
-/// smuggle strftime tokens in.
+/// pass through, and a literal `%` is escaped so a stored value cannot smuggle
+/// strftime tokens in.
+///
+/// Scanned in ONE left-to-right pass, longest token first. The previous version
+/// ran a chain of `str::replace` calls, which had two ways to be wrong: it had
+/// no `hh`, so the single-`h` rule matched *both* characters and emitted the
+/// hour twice (`hh:mm:ss` rendered `0909:11:06`), and every later replacement
+/// re-scanned text an earlier one had already produced. A single pass can do
+/// neither, because output is never re-examined.
 pub fn time_format_to_strftime(fmt: &str) -> String {
-    let mut out = fmt.replace('%', "%%");
-    for (from, to) in [("HH", "%H"), ("mm", "%M"), ("ss", "%S"), ("h", "%I"), ("A", "%p"), ("a", "%P")]
-    {
-        out = out.replace(from, to);
+    // Longest-first within each family: `hh` must be tried before `h`.
+    const TOKENS: &[(&str, &str)] = &[
+        ("HH", "%H"), // 00-23, padded
+        ("H", "%H"),
+        ("hh", "%I"), // 01-12, padded
+        ("h", "%I"),
+        ("mm", "%M"),
+        ("m", "%M"),
+        ("ss", "%S"),
+        ("s", "%S"),
+        ("A", "%p"), // AM/PM
+        ("a", "%P"), // am/pm
+    ];
+
+    let mut out = String::with_capacity(fmt.len() + 8);
+    let mut rest = fmt;
+    'scan: while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix('%') {
+            out.push_str("%%");
+            rest = r;
+            continue;
+        }
+        for (from, to) in TOKENS {
+            if let Some(r) = rest.strip_prefix(from) {
+                out.push_str(to);
+                rest = r;
+                continue 'scan;
+            }
+        }
+        // Not a token: copy one character through verbatim. Stepping by a whole
+        // char keeps multi-byte separators intact.
+        let ch = rest.chars().next().expect("non-empty");
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
     }
     out
 }
@@ -284,6 +321,36 @@ mod tests {
         assert_eq!(time_format_to_strftime("h:mm a"), "%I:%M %P");
         // Literal % in a stored value must not smuggle tokens through.
         assert_eq!(time_format_to_strftime("%n"), "%%n");
+    }
+
+    #[test]
+    fn a_doubled_token_is_one_field_not_two() {
+        // The regression: with no "hh" rule, the single-"h" rule matched both
+        // characters and emitted the hour twice — 9:11:06pm rendered as
+        // "0909:11:06:pm". Every doubled form must collapse to one field.
+        assert_eq!(time_format_to_strftime("hh:mm:ss:a"), "%I:%M:%S:%P");
+        assert_eq!(time_format_to_strftime("hh"), "%I");
+        assert_eq!(time_format_to_strftime("HH"), "%H");
+        assert_eq!(time_format_to_strftime("ss"), "%S");
+        assert_eq!(time_format_to_strftime("mm"), "%M");
+    }
+
+    #[test]
+    fn single_letter_forms_are_understood_too() {
+        // moment.js allows the unpadded spellings; they were silently passed
+        // through as literal letters before.
+        assert_eq!(time_format_to_strftime("H:m:s"), "%H:%M:%S");
+        assert_eq!(time_format_to_strftime("h:mm A"), "%I:%M %p");
+    }
+
+    #[test]
+    fn output_is_never_rescanned_for_more_tokens() {
+        // A single pass is what makes this safe: "%H" produced by an earlier
+        // rule contains an "H", and a second replace pass would have expanded
+        // it again. Separators and unknown text pass through untouched.
+        assert_eq!(time_format_to_strftime("[HH]"), "[%H]");
+        assert_eq!(time_format_to_strftime("HH·mm"), "%H·%M", "multi-byte separator survives");
+        assert_eq!(time_format_to_strftime(""), "");
     }
 
     #[test]
