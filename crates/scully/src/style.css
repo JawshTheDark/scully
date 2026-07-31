@@ -50,9 +50,12 @@ window {
   background-color: transparent;
 }
 
-/* Sidebar header: brand on the left, tools on the right. */
+/* Sidebar header: brand on the left, tools on the right. Everything in here is
+ * deliberately compact — the sidebar is ~250px, and five toolbar buttons at the
+ * default size demand more than that, which makes GTK overflow the pane and
+ * clip every label in the list. */
 .sidebar-header {
-  padding: 8px 10px;
+  padding: 6px 8px;
   border-bottom: 1px solid @border;
   background-color: @bg_soft;
 }
@@ -61,6 +64,14 @@ window {
   color: @fg;
   font-weight: 700;
   letter-spacing: 1px;
+  font-size: 9.5pt;
+}
+
+.sidebar-header button.toolbtn {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0 3px;
+  border: none;
 }
 
 .network-header {

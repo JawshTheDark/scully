@@ -67,7 +67,12 @@ fn main() -> glib::ExitCode {
         )
         .init();
 
-    let gtk_app = gtk::Application::builder().application_id(APP_ID).build();
+    // A second launch normally hands off to the running instance (presence and
+    // read state are account-wide, so two processes would fight). SCULLY_APP_ID
+    // overrides the identity so a development build can run beside a real
+    // session instead of opening a window in it.
+    let app_id = std::env::var("SCULLY_APP_ID").unwrap_or_else(|_| APP_ID.to_string());
+    let gtk_app = gtk::Application::builder().application_id(&app_id).build();
 
     gtk_app.connect_startup(|_| load_css());
 

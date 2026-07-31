@@ -325,8 +325,12 @@ impl ChatWindow {
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&left)
             .end_child(&inner)
-            .position(230)
+            .position(250)
             .resize_start_child(false)
+            // Without this the pane may be allocated LESS than the sidebar's
+            // minimum width, and GTK then overflows the child instead of
+            // widening — which clipped the left edge off every row in the list.
+            .shrink_start_child(false)
             .build();
         window.set_child(Some(&outer));
 
@@ -1472,6 +1476,11 @@ impl ChatWindow {
                         row_box.append(
                             &gtk::Label::builder()
                                 .label(net)
+                                // Ellipsize, or a long network name widens the
+                                // row past the sidebar and pushes the badges
+                                // out of sight.
+                                .ellipsize(gtk::pango::EllipsizeMode::End)
+                                .max_width_chars(12)
                                 .css_classes(["buffer-net"])
                                 .build(),
                         );
