@@ -783,6 +783,21 @@ impl ChatWindow {
         });
         self.member_list.add_controller(right);
 
+        // Touch equivalent. A phone has no right button, so press-and-hold is
+        // how these menus are reached there; the handler is the same one, so
+        // the two input methods can never drift apart.
+        let this = self.clone();
+        let hold = gtk::GestureLongPress::new();
+        hold.connect_pressed(move |gesture, x, y| {
+            let Some(row) = this.member_list.row_at_y(y as i32) else { return };
+            let idx = row.index() as usize;
+            let Some(nick) = this.member_nicks.borrow().get(idx).cloned() else { return };
+            *this.menu_nick.borrow_mut() = nick.clone();
+            this.open_nick_menu(&nick, x as i32, y as i32);
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        self.member_list.add_controller(hold);
+
         // Middle-click a buffer row: pop that channel out without switching
         // the main window's own view.
         let this = self.clone();
@@ -813,6 +828,17 @@ impl ChatWindow {
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
         self.buffer_list.add_controller(buf_right);
+
+        let this = self.clone();
+        let buf_hold = gtk::GestureLongPress::new();
+        buf_hold.connect_pressed(move |gesture, x, y| {
+            let Some(row) = this.buffer_list.row_at_y(y as i32) else { return };
+            let idx = row.index() as usize;
+            let Some(key) = this.rows.borrow().get(idx).cloned() else { return };
+            this.open_buffer_menu(key, x as i32, y as i32);
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        self.buffer_list.add_controller(buf_hold);
 
         let this = self.clone();
         self.entry.connect_activate(move |entry| {
@@ -1765,6 +1791,26 @@ impl ChatWindow {
                         }
                     });
                     row.add_controller(right);
+
+                    // Same menu by press-and-hold, for touch.
+                    let hold = gtk::GestureLongPress::new();
+                    let weak = self.clone_handle();
+                    let net_name = net_title.clone();
+                    let anchor = row.clone();
+                    hold.connect_pressed(move |gesture, x, y| {
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
+                        if let Some(this) = weak.upgrade() {
+                            let (px, py) = anchor
+                                .compute_point(
+                                    &this.buffer_pane,
+                                    &gtk::graphene::Point::new(x as f32, y as f32),
+                                )
+                                .map(|p| (p.x() as i32, p.y() as i32))
+                                .unwrap_or((x as i32, y as i32));
+                            this.open_network_menu(net_id, &net_name, offline, px, py);
+                        }
+                    });
+                    row.add_controller(hold);
                 }
 
                 self.buffer_list.append(&row);
