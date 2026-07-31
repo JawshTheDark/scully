@@ -18,8 +18,21 @@ use crate::app::AppRef;
 
 /// Open the add-network window, transient for `parent`.
 pub fn open(app: &AppRef, parent: &gtk::Window) {
+    build(app, parent, None);
+}
+
+/// Open the same form pre-filled, to edit an existing network.
+pub fn open_edit(app: &AppRef, parent: &gtk::Window, row: lurker_client::NetworkRow) {
+    build(app, parent, Some(row));
+}
+
+fn build(app: &AppRef, parent: &gtk::Window, existing: Option<lurker_client::NetworkRow>) {
+    let editing = existing.as_ref().map(|r| r.id);
     let window = gtk::Window::builder()
-        .title("Add a network")
+        .title(match &existing {
+            Some(r) => format!("Edit {}", r.name),
+            None => "Add a network".to_string(),
+        })
         .default_width(460)
         .modal(false)
         .transient_for(parent)
@@ -63,23 +76,50 @@ pub fn open(app: &AppRef, parent: &gtk::Window) {
         entries.push((key, entry));
     }
 
-    // Defaults that match the common case: TLS on, port 6697, autoconnect.
-    if let Some((_, e)) = entries.iter().find(|(k, _)| *k == "port") {
-        e.set_text("6697");
+    // Prefill when editing; otherwise defaults for the common case.
+    let set = |key: &str, value: &str| {
+        if let Some((_, e)) = entries.iter().find(|(k, _)| *k == key) {
+            e.set_text(value);
+        }
+    };
+    match &existing {
+        Some(r) => {
+            set("name", &r.name);
+            set("host", &r.host);
+            set("port", &r.port.map(|p| p.to_string()).unwrap_or_default());
+            set("nick", r.nick.as_deref().unwrap_or(""));
+            set("username", r.username.as_deref().unwrap_or(""));
+            set("realname", r.realname.as_deref().unwrap_or(""));
+            set("sasl_account", r.sasl_account.as_deref().unwrap_or(""));
+            // Passwords are never returned. A blank field means "leave it
+            // alone", so say so rather than looking like the password is unset.
+            for (key, has) in [("server_password", r.has_password), ("sasl_password", r.has_sasl_password)] {
+                if has {
+                    if let Some((_, e)) = entries.iter().find(|(k, _)| *k == key) {
+                        e.set_placeholder_text(Some("(unchanged)"));
+                    }
+                }
+            }
+        }
+        None => set("port", "6697"),
     }
     outer.append(&grid);
 
     let tls = gtk::CheckButton::with_label("Use TLS");
-    tls.set_active(true);
+    tls.set_active(existing.as_ref().map(|r| r.tls).unwrap_or(true));
     let autoconnect = gtk::CheckButton::with_label("Connect automatically");
-    autoconnect.set_active(true);
+    autoconnect.set_active(existing.as_ref().map(|r| r.autoconnect).unwrap_or(true));
     outer.append(&tls);
     outer.append(&autoconnect);
 
     let channels = gtk::Entry::builder()
         .placeholder_text("#channels to join, space or comma separated (optional)")
         .build();
-    outer.append(&channels);
+    // Autojoin channels are seeded at creation only; editing them afterwards is
+    // done by joining/parting, not by rewriting a list.
+    if editing.is_none() {
+        outer.append(&channels);
+    }
 
     let status = gtk::Label::builder().xalign(0.0).css_classes(["chanctl-current"]).build();
     outer.append(&status);
@@ -88,7 +128,7 @@ pub fn open(app: &AppRef, parent: &gtk::Window) {
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     let cancel = gtk::Button::with_label("Cancel");
-    let add = gtk::Button::with_label("Add network");
+    let add = gtk::Button::with_label(if editing.is_some() { "Save" } else { "Add network" });
     buttons.append(&spacer);
     buttons.append(&cancel);
     buttons.append(&add);
@@ -156,18 +196,22 @@ pub fn open(app: &AppRef, parent: &gtk::Window) {
                 payload.insert("default_channel".into(), serde_json::json!(chans));
             }
 
-            status.set_text("adding…");
+            status.set_text(if editing.is_some() { "saving…" } else { "adding…" });
             add_btn.set_sensitive(false);
             let window = window.clone();
             let status = status.clone();
             let add_btn = add_btn.clone();
-            app.create_network(serde_json::Value::Object(payload), move |res| match res {
+            let done = move |res: Result<(), String>| match res {
                 Ok(()) => window.close(),
                 Err(e) => {
                     status.set_text(&e);
                     add_btn.set_sensitive(true);
                 }
-            });
+            };
+            match editing {
+                Some(id) => app.update_network(id, serde_json::Value::Object(payload), done),
+                None => app.create_network(serde_json::Value::Object(payload), done),
+            }
         });
     }
 

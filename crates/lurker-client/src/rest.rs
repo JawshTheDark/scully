@@ -87,6 +87,12 @@ pub struct NetworkRow {
     pub nick: Option<String>,
     #[serde(default)]
     pub autoconnect: bool,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub realname: Option<String>,
+    #[serde(default)]
+    pub sasl_account: Option<String>,
     /// Passwords are never returned; only whether one is set.
     #[serde(default)]
     pub has_password: bool,
@@ -497,6 +503,19 @@ impl Rest {
             .await?;
         let env: NetworkEnvelope = Self::check(resp).await?.json().await?;
         Ok(env.network)
+    }
+
+    /// `PATCH /api/networks/:id` — edit a network. Only the keys present are
+    /// changed, so omitting a password leaves the stored one alone rather than
+    /// clearing it.
+    pub async fn update_network(&self, id: i64, fields: serde_json::Value) -> Result<()> {
+        let resp = self
+            .authed(self.http.patch(self.url(&format!("api/networks/{id}"))?))
+            .json(&fields)
+            .send()
+            .await?;
+        Self::check(resp).await?;
+        Ok(())
     }
 
     /// `POST /api/networks/:id/{connect,disconnect,reconnect}` — bring a

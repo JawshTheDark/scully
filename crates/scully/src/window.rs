@@ -2334,6 +2334,63 @@ impl ChatWindow {
         *self.buffer_menu.borrow_mut() = Some(popover);
     }
 
+    /// Ask for a channel to join on `net_id`, then join it.
+    ///
+    /// A small prompt rather than a full dialog: the only real input is the
+    /// name, and an optional key for `+k` channels.
+    fn prompt_join(self: &Rc<Self>, net_id: i64) {
+        let window = gtk::Window::builder()
+            .title("Join a channel")
+            .default_width(360)
+            .transient_for(&self.window)
+            .destroy_with_parent(true)
+            .build();
+        window.add_css_class("chanctl");
+
+        let outer = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        outer.set_margin_top(14);
+        outer.set_margin_bottom(14);
+        outer.set_margin_start(16);
+        outer.set_margin_end(16);
+        let name = gtk::Entry::builder().placeholder_text("#channel").build();
+        let key = gtk::Entry::builder().placeholder_text("key (optional, for +k)").build();
+        key.set_visibility(false);
+        outer.append(&name);
+        outer.append(&key);
+        let go = gtk::Button::with_label("Join");
+        outer.append(&go);
+        window.set_child(Some(&outer));
+
+        let this = self.clone();
+        let win = window.clone();
+        let name_e = name.clone();
+        let key_e = key.clone();
+        let join = move || {
+            let mut channel = name_e.text().trim().to_string();
+            if channel.is_empty() {
+                return;
+            }
+            // A bare name is almost always meant as a channel; prepending the
+            // sigil saves the server rejecting it.
+            if !channel.starts_with(['#', '&', '!', '+']) {
+                channel.insert(0, '#');
+            }
+            let k = key_e.text().trim().to_string();
+            let chan_key = BufferKey::new(Some(net_id), &channel);
+            this.app.store.borrow_mut().note_pending_join(chan_key);
+            this.app.send(ClientVerb::Join {
+                network_id: net_id,
+                channel,
+                key: (!k.is_empty()).then_some(k),
+            });
+            win.close();
+        };
+        let j = join.clone();
+        go.connect_clicked(move |_| j());
+        name.connect_activate(move |_| join());
+        window.present();
+    }
+
     /// Context menu for a network header: connect / disconnect / reconnect,
     /// add another, or remove this one.
     ///
@@ -2361,6 +2418,13 @@ impl ChatWindow {
         }
         model.append_section(None, &conn);
         let manage = gio::Menu::new();
+        if !offline {
+            manage.append_item(&gio::MenuItem::new(
+                Some("Join a channel…"),
+                Some("net.cmd::join"),
+            ));
+        }
+        manage.append_item(&gio::MenuItem::new(Some("Edit this network…"), Some("net.cmd::edit")));
         manage.append_item(&gio::MenuItem::new(Some("Add a network…"), Some("net.cmd::add")));
         manage.append_item(&gio::MenuItem::new(
             Some("Remove this network…"),
@@ -2411,6 +2475,20 @@ impl ChatWindow {
                 });
             }
             "add" => crate::networkdialog::open(&self.app, self.window.clone().upcast_ref()),
+            "edit" => {
+                // The roster carries fields the WS snapshot omits, so fetch the
+                // row before showing a form that would otherwise blank them.
+                let win = self.window.clone();
+                let app = self.app.clone();
+                let status = status.clone();
+                self.app.fetch_network_row(net_id, move |row| match row {
+                    Some(row) => {
+                        crate::networkdialog::open_edit(&app, win.clone().upcast_ref(), row)
+                    }
+                    None => status.set_text("could not read that network"),
+                });
+            }
+            "join" => self.prompt_join(net_id),
             "remove" => {
                 // Destructive and account-wide: confirm, and name the network so
                 // there is no doubt which one is about to go.

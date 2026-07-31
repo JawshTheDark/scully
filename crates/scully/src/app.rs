@@ -791,6 +791,42 @@ impl App {
         );
     }
 
+    /// Edit a network. Only the supplied keys change, so an omitted password
+    /// is left as it was rather than cleared.
+    pub fn update_network(
+        self: &AppRef,
+        id: i64,
+        fields: serde_json::Value,
+        report: impl Fn(Result<(), String>) + 'static,
+    ) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        let app = self.clone();
+        self.spawn_async(
+            async move { rest.update_network(id, fields).await },
+            move |res| match res {
+                Ok(()) => {
+                    app.refresh_networks();
+                    report(Ok(()));
+                }
+                Err(e) => report(Err(e.to_string())),
+            },
+        );
+    }
+
+    /// Fetch one network's full row (the roster carries fields the WS snapshot
+    /// deliberately omits), for pre-filling the edit form.
+    pub fn fetch_network_row(
+        self: &AppRef,
+        id: i64,
+        done: impl Fn(Option<lurker_client::NetworkRow>) + 'static,
+    ) {
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        self.spawn_async(
+            async move { rest.networks().await },
+            move |res| done(res.ok().and_then(|rows| rows.into_iter().find(|r| r.id == id))),
+        );
+    }
+
     /// Re-read the network roster into the store (after an add or removal).
     pub fn refresh_networks(self: &AppRef) {
         let Some(rest) = self.rest.borrow().clone() else { return };
