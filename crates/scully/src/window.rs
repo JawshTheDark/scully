@@ -2797,6 +2797,46 @@ impl ChatWindow {
                 self.try_start_call();
                 return true;
             }
+            // CTCP is NOT an IRC command — it is a PRIVMSG whose body is
+            // wrapped in \x01 — so it has to go out through the typed verb.
+            // Without these arms both fell through to the raw passthrough,
+            // which sent a literal "CTCP …" line and got back the server's
+            // "Unknown command". The nicklist menu always used the verb; only
+            // the typed commands were missing.
+            ("ctcp", Some(net)) => {
+                let mut it = args.split_whitespace();
+                let (Some(target), Some(kind)) = (it.next(), it.next()) else {
+                    self.status_label.set_text("usage: /ctcp <nick> <TYPE> [args]");
+                    return true;
+                };
+                Some(ClientVerb::Ctcp {
+                    network_id: net,
+                    target: target.to_string(),
+                    ctcp_type: kind.to_ascii_uppercase(),
+                    args: it.collect::<Vec<_>>().join(" "),
+                    // Replies surface in the buffer the request was issued from.
+                    issuing_target: self.app.wire_target(key),
+                })
+            }
+            ("ping", Some(net)) => {
+                let target = args.split_whitespace().next().unwrap_or("");
+                if target.is_empty() {
+                    self.status_label.set_text("usage: /ping <nick>");
+                    return true;
+                }
+                // Convention: carry a timestamp so the reply can be timed.
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs().to_string())
+                    .unwrap_or_default();
+                Some(ClientVerb::Ctcp {
+                    network_id: net,
+                    target: target.to_string(),
+                    ctcp_type: "PING".to_string(),
+                    args: stamp,
+                    issuing_target: self.app.wire_target(key),
+                })
+            }
             ("whois" | "wi", Some(net)) => {
                 let target = args.split_whitespace().next().unwrap_or("").to_string();
                 if !target.is_empty() {

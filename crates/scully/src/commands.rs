@@ -300,6 +300,8 @@ pub const KNOWN: &[&str] = &[
     "tableflip", "unflip", "slap", "help", "call",
     // IRCv3 client-facing commands (see the module notes on what is excluded).
     "setname", "realname", "monitor", "redact", "metadata",
+    // CTCP goes out as a typed verb (a PRIVMSG in \x01), never a raw IRC line.
+    "ctcp", "ping",
 ];
 
 #[cfg(test)]
@@ -370,6 +372,19 @@ mod tests {
         assert_eq!(raw("metadata", "* list").unwrap(), "METADATA * LIST");
         assert_eq!(raw("metadata", "#chan get url").unwrap(), "METADATA #chan GET url");
         assert!(raw("metadata", "*").is_none(), "a target alone is not a command");
+    }
+
+    #[test]
+    fn ctcp_is_never_translated_to_a_raw_irc_line() {
+        // CTCP is a PRIVMSG wrapped in \x01, not an IRC command. Translating it
+        // here would send a literal "CTCP …" line, which every server answers
+        // with "Unknown command" — that was the bug. The window sends these
+        // through ClientVerb::Ctcp instead, so this table must leave them alone
+        // while completion still offers them.
+        for cmd in ["ctcp", "ping"] {
+            assert!(raw(cmd, "someone VERSION").is_none(), "{cmd} must not become a raw line");
+            assert!(KNOWN.contains(&cmd), "{cmd} should still be completable");
+        }
     }
 
     #[test]
