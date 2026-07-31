@@ -70,22 +70,84 @@ pub fn format(whois: &Value) -> Vec<String> {
     if let Some(chans) = channels {
         out.push(format!("  on channels: {chans}"));
     }
+    if let Some(op) = field(whois, &["operator"]) {
+        out.push(format!("  {op}"));
+    }
+    if let Some(modes) = field(whois, &["modes"]) {
+        out.push(format!("  modes {modes}"));
+    }
+    // The real host/IP behind a cloak (RPL_WHOISHOST / RPL_WHOISACTUALLY).
+    // Oper-visible on most networks, and one of the main reasons to whois at
+    // all — dropping it made the formatted view strictly worse than the raw one.
+    match (field(whois, &["actual_hostname"]), field(whois, &["actual_ip"])) {
+        (Some(h), Some(ip)) if h != ip => out.push(format!("  connecting from {h} ({ip})")),
+        (Some(h), None) => out.push(format!("  connecting from {h}")),
+        (Some(_), Some(ip)) | (None, Some(ip)) => out.push(format!("  connecting from {ip}")),
+        (None, None) => {}
+    }
     if field(whois, &["secure", "ssl"]).as_deref() == Some("true") {
         out.push("  using a secure connection".to_string());
     }
-    if let Some(op) = field(whois, &["operator"]) {
-        out.push(format!("  {op}"));
+    if let Some(fp) = field(whois, &["certfp"]) {
+        out.push(format!("  TLS certificate {fp}"));
+    }
+    if let Some(reg) = field(whois, &["registered_nick"]) {
+        out.push(format!("  {reg}"));
+    }
+    if let Some(bot) = field(whois, &["bot"]) {
+        out.push(format!("  {bot}"));
+    }
+    // Free-form server lines (RPL_WHOISSPECIAL): security groups, IP
+    // reputation, connection class — whatever the ircd chooses to volunteer,
+    // and typically the oper-only detail. Rendered verbatim, because their
+    // wording is entirely the server's own.
+    if let Some(Value::Array(items)) = whois.get("special") {
+        for item in items {
+            if let Some(line) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                out.push(format!("  {line}"));
+            }
+        }
+    } else if let Some(one) = field(whois, &["special"]) {
+        out.push(format!("  {one}"));
+    }
+    match (field(whois, &["country"]), field(whois, &["country_code"])) {
+        (Some(c), Some(code)) => out.push(format!("  {c} ({code})")),
+        (Some(c), None) => out.push(format!("  {c}")),
+        _ => {}
+    }
+    if let Some(asn) = field(whois, &["asn"]) {
+        out.push(format!("  {asn}"));
+    }
+    if let Some(help) = field(whois, &["helpop"]) {
+        out.push(format!("  {help}"));
     }
     if let Some(away) = field(whois, &["away"]) {
         out.push(format!("  away: {away}"));
     }
-    if let Some(idle) = field(whois, &["idle"]) {
-        // idle is seconds.
-        if let Ok(secs) = idle.parse::<i64>() {
-            out.push(format!("  idle {}", human_idle(secs)));
+    // Idle and signon arrive together (RPL_WHOISIDLE) and read as one fact:
+    // how long quiet, and since when connected.
+    let idle = field(whois, &["idle"]).and_then(|s| s.parse::<i64>().ok());
+    let signon = field(whois, &["logon", "signon"]).and_then(|s| s.parse::<i64>().ok());
+    match (idle, signon) {
+        (Some(secs), Some(ts)) => {
+            out.push(format!("  idle {}, signed on {}", human_idle(secs), local_time(ts)))
         }
+        (Some(secs), None) => out.push(format!("  idle {}", human_idle(secs))),
+        (None, Some(ts)) => out.push(format!("  signed on {}", local_time(ts))),
+        (None, None) => {}
     }
     out
+}
+
+/// A unix timestamp as local wall-clock text. Falls back to the raw seconds if
+/// the value is out of range, so a nonsense stamp still shows *something*
+/// rather than dropping the line.
+fn local_time(unix_secs: i64) -> String {
+    gtk::glib::DateTime::from_unix_local(unix_secs)
+        .ok()
+        .and_then(|d| d.format("%Y-%m-%d %H:%M:%S").ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| unix_secs.to_string())
 }
 
 fn human_idle(secs: i64) -> String {
@@ -126,6 +188,48 @@ mod tests {
         assert!(lines.iter().any(|l| l == "  on channels: #lurker @#dev"));
         assert!(lines.iter().any(|l| l.contains("secure connection")));
         assert!(lines.iter().any(|l| l == "  idle 1h 2m 5s"));
+    }
+
+    #[test]
+    fn an_opered_whois_keeps_every_field_the_server_volunteered() {
+        // Modelled on a real opered WHOIS: the formatted view used to drop the
+        // modes, the real IP behind the cloak, and the free-form server lines
+        // (security groups, IP reputation) — which are precisely the fields you
+        // opered up to see. It was strictly less informative than the raw text.
+        let w = json!({
+            "nick": "Guest22618", "ident": "pez808",
+            "hostname": "D22F3C53.2FBF0C20.4E6D4592.IP", "real_name": "pez808",
+            "modes": "+iwxz",
+            "actual_hostname": "*@172.19.0.3", "actual_ip": "172.19.0.3",
+            "server": "irc.so", "server_info": "irc.so IRC Server",
+            "channels": "#glossedglare",
+            "secure": true,
+            "special": [
+                "is in security-groups: known-users,tls-users",
+                "is using an IP with a reputation score of 633",
+            ],
+            "away": "afk since 2026-07-30 23:30:39-0400",
+            "idle": 3800, "logon": 1785438177,
+        });
+        let lines = format(&w);
+        let all = lines.join("\n");
+
+        assert!(all.contains("modes +iwxz"), "modes dropped:\n{all}");
+        assert!(all.contains("172.19.0.3"), "real IP dropped:\n{all}");
+        assert!(all.contains("security-groups: known-users,tls-users"), "special dropped:\n{all}");
+        assert!(all.contains("reputation score of 633"), "special dropped:\n{all}");
+        assert!(all.contains("idle 1h 3m 20s"), "idle wrong:\n{all}");
+        assert!(all.contains("signed on"), "signon dropped:\n{all}");
+        assert!(all.contains("away: afk since"), "away dropped:\n{all}");
+    }
+
+    #[test]
+    fn a_cloaked_host_equal_to_the_ip_is_not_printed_twice() {
+        let lines = format(&json!({
+            "nick": "x", "actual_hostname": "10.0.0.5", "actual_ip": "10.0.0.5",
+        }));
+        let line = lines.iter().find(|l| l.contains("connecting from")).expect("host line");
+        assert_eq!(line.trim(), "connecting from 10.0.0.5", "duplicated: {line}");
     }
 
     #[test]
