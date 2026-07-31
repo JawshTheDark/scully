@@ -187,8 +187,22 @@ impl ChatWindow {
             .vexpand(true)
             .build();
         let left = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        left.append(&buffer_scroll);
         left.add_css_class("sidebar");
+        // Sidebar header — brand, then the window's tools. They live here
+        // rather than over the message pane because they act on the session,
+        // not on the conversation you happen to be reading.
+        let sidebar_header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        sidebar_header.add_css_class("sidebar-header");
+        sidebar_header.append(
+            &gtk::Label::builder()
+                .label("SCULLY")
+                .xalign(0.0)
+                .hexpand(true)
+                .css_classes(["brand-mark"])
+                .build(),
+        );
+        left.append(&sidebar_header);
+        left.append(&buffer_scroll);
         let buffer_pane = left.clone();
 
         // ── Centre: title, messages, status, input ──
@@ -221,11 +235,13 @@ impl ChatWindow {
         // Hidden until `voiceEnabled` arrives — see refresh_voice_ui.
         let btn_call = tool("\u{1F4DE}", "Start or join a voice call (/call)");
         btn_call.set_visible(false);
-        header.append(&btn_search);
-        header.append(&btn_call);
-        header.append(&btn_popout);
-        header.append(&btn_read);
-        header.append(&btn_settings);
+        // The tools sit in the sidebar header (see above). A popout has no
+        // sidebar, so it simply has no toolbar — which it already didn't.
+        sidebar_header.append(&btn_search);
+        sidebar_header.append(&btn_call);
+        sidebar_header.append(&btn_popout);
+        sidebar_header.append(&btn_read);
+        sidebar_header.append(&btn_settings);
 
         let text = gtk::TextBuffer::new(None);
         let text_view = gtk::TextView::builder()
@@ -1089,6 +1105,8 @@ impl ChatWindow {
                 StoreEvent::WhoisResult(event) => self.show_whois(event),
                 // The finder windows own their own result rendering.
                 StoreEvent::SearchResults => {}
+                // The channel browser owns its own rendering.
+                StoreEvent::ChanlistResult | StoreEvent::ChanlistState => {}
                 StoreEvent::PausedChanged(_) => status = true,
                 // A call started/ended/changed size somewhere — repaint the
                 // buffer list so its "call active (N)" badge is current.
@@ -1305,6 +1323,7 @@ impl ChatWindow {
                 .header
                 .as_ref()
                 .is_some_and(|t| self.collapsed.borrow().contains(t));
+            let has_header = section.header.is_some();
 
             if let Some(title) = &section.header {
                 // Collapsing must not hide the fact that something wants
@@ -1319,6 +1338,14 @@ impl ChatWindow {
                     .label(if folded { "▸" } else { "▾" })
                     .css_classes(["network-header"])
                     .build();
+                // Connection dot: readable at a glance without reading the name.
+                let dot = gtk::Label::builder()
+                    .label("\u{25CF}")
+                    .css_classes(["net-dot"])
+                    .build();
+                if section.offline {
+                    dot.add_css_class("offline");
+                }
                 let header = gtk::Label::builder()
                     .xalign(0.0)
                     .label(title)
@@ -1329,6 +1356,11 @@ impl ChatWindow {
                     header.add_css_class("offline");
                 }
                 header_box.append(&caret);
+                // Only real networks get a connection dot; the cross-network
+                // sections (pinned, DMs, DCC) have no single state to report.
+                if !section.cross_network {
+                    header_box.append(&dot);
+                }
                 header_box.append(&header);
                 if folded && (unread > 0 || highlights > 0) {
                     let badge = gtk::Label::builder()
@@ -1464,6 +1496,11 @@ impl ChatWindow {
 
                 let row = gtk::ListBoxRow::builder().child(&row_box).build();
                 row.add_css_class("buffer-row");
+                // Rows under a header are indented behind a hairline, so a long
+                // list reads as grouped rather than as one flat column.
+                if has_header {
+                    row.add_css_class("child");
+                }
                 if buf.is_some_and(|b| !b.joined) && key.is_channel() {
                     row.add_css_class("parted");
                 }
@@ -2180,10 +2217,19 @@ impl ChatWindow {
 
         let popover = gtk::PopoverMenu::from_model(Some(&model));
         popover.insert_action_group("nick", Some(&group));
-        popover.set_parent(&self.member_list);
+        // Parented to the PANE, not the list. A popover anchored inside a
+        // ScrolledWindow is constrained to the scrolled viewport, so GTK gives
+        // it its own scrollbar — a five-item menu that scrolls. The pane does
+        // not scroll, so the menu is free to be its natural height.
+        let (px, py) = self
+            .member_list
+            .compute_point(&self.member_pane, &gtk::graphene::Point::new(x as f32, y as f32))
+            .map(|p| (p.x() as i32, p.y() as i32))
+            .unwrap_or((x, y));
+        popover.set_parent(&self.member_pane);
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
-        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(px, py, 1, 1)));
 
         // Header showing who and the clicker's own status, so the gating is
         // legible ("you are op here").
@@ -2228,10 +2274,18 @@ impl ChatWindow {
 
         let popover = gtk::PopoverMenu::from_model(Some(&model));
         popover.insert_action_group("buf", Some(&group));
-        popover.set_parent(&self.buffer_list);
+        // Parented to the pane rather than the scrolled list — see
+        // open_nick_menu: anchoring inside a ScrolledWindow makes GTK clamp the
+        // menu to the viewport and give a four-item menu a scrollbar.
+        let (px, py) = self
+            .buffer_list
+            .compute_point(&self.buffer_pane, &gtk::graphene::Point::new(x as f32, y as f32))
+            .map(|p| (p.x() as i32, p.y() as i32))
+            .unwrap_or((x, y));
+        popover.set_parent(&self.buffer_pane);
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
-        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(px, py, 1, 1)));
 
         *self.menu_buffer.borrow_mut() = Some(key);
         popover.popup();

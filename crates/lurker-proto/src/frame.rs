@@ -43,6 +43,21 @@ pub enum BacklogMode {
     Shell,
 }
 
+/// One channel in a `chanlist-result` page.
+///
+/// Deliberately NOT `rename_all = "camelCase"`: the server builds these rows by
+/// hand and emits `num_users` in snake_case, alone among the camelCase frames.
+/// Renaming would silently zero every user count.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ChanlistRow {
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub topic: String,
+    #[serde(default)]
+    pub num_users: u32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BacklogFrame {
@@ -422,8 +437,30 @@ pub enum ServerFrame {
         #[serde(default)]
         paused: bool,
     },
-    ChanlistState(serde_json::Value),
-    ChanlistResult(serde_json::Value),
+    /// Progress of a `LIST` refresh for a network.
+    #[serde(rename_all = "camelCase")]
+    ChanlistState {
+        network_id: i64,
+        #[serde(default)]
+        in_progress: bool,
+        #[serde(default)]
+        total_count: u32,
+    },
+    /// A page of the cached channel list, answering `chanlist-search`.
+    #[serde(rename_all = "camelCase")]
+    ChanlistResult {
+        network_id: i64,
+        #[serde(default)]
+        query: String,
+        /// Salvaged row by row: one odd entry in a list of thousands must not
+        /// cost the whole page.
+        #[serde(default, deserialize_with = "lenient")]
+        rows: Vec<ChanlistRow>,
+        #[serde(default)]
+        total: u32,
+        #[serde(default)]
+        in_progress: bool,
+    },
     #[serde(rename_all = "camelCase")]
     SearchResult {
         #[serde(default)]
@@ -495,6 +532,36 @@ mod tests {
             parse(r##"{"kind":"time-travel","payload":{"x":1}}"##),
             ServerFrame::Unknown
         ));
+    }
+
+    #[test]
+    fn chanlist_rows_keep_the_servers_snake_case_user_count() {
+        // The rows are the one place the server emits snake_case: `num_users`,
+        // surrounded by camelCase fields. Folding them into the usual rename
+        // would parse every count as zero, which reads as "empty channel"
+        // rather than as a bug.
+        let f = parse(
+            r##"{"kind":"chanlist-result","networkId":2,"query":"lurk","total":3,
+                 "inProgress":true,
+                 "rows":[{"channel":"#lurker","topic":"the truth","num_users":42}]}"##,
+        );
+        let ServerFrame::ChanlistResult { network_id, query, rows, total, in_progress } = f else {
+            panic!("expected chanlist-result");
+        };
+        assert_eq!((network_id, query.as_str(), total, in_progress), (2, "lurk", 3, true));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].channel, "#lurker");
+        assert_eq!(rows[0].num_users, 42, "num_users must not be renamed");
+        assert_eq!(rows[0].topic, "the truth");
+    }
+
+    #[test]
+    fn chanlist_state_reports_refresh_progress() {
+        let f = parse(r##"{"kind":"chanlist-state","networkId":7,"inProgress":true,"totalCount":900}"##);
+        let ServerFrame::ChanlistState { network_id, in_progress, total_count } = f else {
+            panic!("expected chanlist-state");
+        };
+        assert_eq!((network_id, in_progress, total_count), (7, true, 900));
     }
 
     #[test]

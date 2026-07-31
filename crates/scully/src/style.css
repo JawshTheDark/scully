@@ -6,16 +6,31 @@
  * styling is not CSS-driven, so those live in window.rs beside the tags.
  */
 
-@define-color bg        #16161d;
-@define-color bg_soft   #1c1c25;
-@define-color bg_raised #22222c;
-@define-color fg        #c9c9d4;
-@define-color fg_muted  #6b6b7b;
-@define-color accent    #82aaff;
-@define-color good      #4f8f5f;
-@define-color bad       #ff5370;
-@define-color warn      #ffcb6b;
-@define-color border    #2a2a36;
+/* Lurker's own default tokens (vue_client/src/assets/main.css), so a user
+ * moving between the web client and Scully sees one product rather than two.
+ * bg_raised has no Lurker equivalent — GTK needs a distinct selected-row fill
+ * where the web client uses a translucent overlay — so it is derived. */
+@define-color bg        #212022;
+@define-color bg_soft   #2c2a2e;
+@define-color bg_raised #38363a;
+@define-color fg        #fcfcfa;
+@define-color fg_muted  #939293;
+@define-color accent    #a99dec;
+@define-color good      #b3db82;
+@define-color bad       #ed6c89;
+@define-color warn      #f9d978;
+@define-color border    #3a383c;
+
+/* Defaults for the tokens theme.rs re-defines live from the server's
+ * `look.color.*` settings. Declared here too so the first paint — before
+ * settings arrive — is already Lurker's palette rather than unstyled. */
+@define-color member_owner  #ed6c89;
+@define-color member_admin  #fc9867;
+@define-color member_op     #a99dec;
+@define-color member_halfop #78dce8;
+@define-color member_voice  #b3db82;
+@define-color buffer_unread    #a99dec;
+@define-color buffer_highlight #f9d978;
 
 window {
   background-color: @bg;
@@ -35,6 +50,19 @@ window {
   background-color: transparent;
 }
 
+/* Sidebar header: brand on the left, tools on the right. */
+.sidebar-header {
+  padding: 8px 10px;
+  border-bottom: 1px solid @border;
+  background-color: @bg_soft;
+}
+
+.brand-mark {
+  color: @fg;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
 .network-header {
   color: @fg_muted;
   font-weight: 700;
@@ -44,6 +72,26 @@ window {
 
 .network-header.offline {
   color: @bad;
+}
+
+/* Connection dot beside a network name: green when the bouncer has that
+   network up, red when it doesn't. The state is already in the header's
+   colour, but a dot is readable at a glance without reading the word. */
+.net-dot {
+  color: @good;
+  font-size: 8pt;
+}
+
+.net-dot.offline {
+  color: @bad;
+}
+
+/* Buffers belonging to the section above them are indented behind a hairline,
+   so a long list reads as grouped rather than as one flat column. */
+row.buffer-row.child {
+  border-left: 1px solid @border;
+  margin-left: 14px;
+  padding-left: 8px;
 }
 
 /* Which network a row belongs to, shown only in the sections that mix them

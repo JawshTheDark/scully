@@ -60,6 +60,11 @@ pub enum StoreEvent {
     /// `settings` frame). Windows re-render, since tier/consolidation are
     /// display choices.
     SettingsChanged,
+    /// A page of the channel list arrived (`/list`). The app holds the rows;
+    /// the browser window redraws.
+    ChanlistResult,
+    /// A `LIST` refresh started or finished for a network.
+    ChanlistState,
     /// A voice call's participant count changed in a channel (Lurker #680), so
     /// any "call active (N)" badge on that buffer should be recomputed. Carries
     /// the affected buffer.
@@ -464,6 +469,8 @@ impl Store {
                     self.max_upload_bytes = Some(cap);
                 }
             }
+            ServerFrame::ChanlistResult { .. } => out.push(StoreEvent::ChanlistResult),
+            ServerFrame::ChanlistState { .. } => out.push(StoreEvent::ChanlistState),
             ServerFrame::CallPresence { network_id, target, count } => {
                 let key = BufferKey::new(Some(network_id), &target);
                 let changed = if count > 0 {
