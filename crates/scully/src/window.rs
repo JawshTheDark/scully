@@ -61,6 +61,8 @@ pub struct ChatWindow {
     overlay: gtk::Overlay,
     centre_pane: gtk::Box,
     sidebar_header: gtk::Box,
+    members_header: gtk::Box,
+    btn_members_back: gtk::Button,
     btn_members: gtk::Button,
     btn_back: gtk::Button,
     /// Narrow (phone) layout: one pane at a time instead of three side by
@@ -338,6 +340,24 @@ impl ChatWindow {
 
         let right = gtk::Box::new(gtk::Orientation::Vertical, 0);
         right.add_css_class("sidebar");
+        // The narrow layout shows this pane INSTEAD of the conversation, and
+        // the conversation header — which owns the back button — goes with it.
+        // So this pane carries its own way out, or the member list is a room
+        // with no door.
+        let members_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        members_header.add_css_class("sidebar-header");
+        let btn_members_back = gtk::Button::builder()
+            .label("\u{2039}")
+            .tooltip_text("Back to the conversation")
+            .css_classes(["toolbtn"])
+            .build();
+        members_header.append(&btn_members_back);
+        members_header.append(
+            &gtk::Label::builder().label("Members").xalign(0.0).hexpand(true)
+                .css_classes(["brand-mark"]).build(),
+        );
+        members_header.set_visible(false);
+        right.append(&members_header);
         right.append(&call_panel);
         right.append(&member_count);
         right.append(&member_scroll);
@@ -404,6 +424,8 @@ impl ChatWindow {
             overlay,
             centre_pane,
             sidebar_header,
+            members_header,
+            btn_members_back,
             btn_members,
             btn_back,
             narrow: Cell::new(false),
@@ -1027,6 +1049,8 @@ impl ChatWindow {
         self.btn_back.connect_clicked(move |_| this.narrow_show_list());
         let this = self.clone();
         self.btn_members.connect_clicked(move |_| this.narrow_toggle_members());
+        let this = self.clone();
+        self.btn_members_back.connect_clicked(move |_| this.narrow_show_list());
 
         // Window-level shortcuts: Ctrl+F search here, Ctrl+Shift+F search
         // everywhere, Ctrl+K quick switcher, Escape returns a detached buffer
@@ -1315,6 +1339,7 @@ impl ChatWindow {
                 self.apply_display_settings();
                 self.btn_back.set_visible(false);
                 self.btn_members.set_visible(false);
+                self.members_header.set_visible(false);
             }
             return;
         }
@@ -1336,6 +1361,7 @@ impl ChatWindow {
         self.member_pane.set_visible(members);
         self.btn_back.set_visible(!list);
         self.btn_members.set_visible(!list);
+        self.members_header.set_visible(members);
     }
 
     /// The narrow layout's Back: members → conversation → list, one step at a
@@ -2482,12 +2508,29 @@ impl ChatWindow {
         }
 
         let count = key.map(|k| self.app.store.borrow().call_count(&k)).unwrap_or(0);
+
+        // A build without the `voice` feature has no media engine, so joining
+        // is impossible however willing the server is. Report a call that is
+        // happening — that information is real and comes from the server — but
+        // do not offer a button that cannot do anything. Offering it and then
+        // explaining the failure in a status bar is worse than not offering it,
+        // and on a phone that status bar is not even on screen.
+        let can_join = cfg!(feature = "voice");
+        self.call_button.set_visible(can_join);
+        self.btn_call.set_visible(can_join && self.app.voice_enabled.get());
+
         if count > 0 {
             self.call_status.set_text(&format!("\u{1F4DE} Call in progress — {count} in call"));
             self.call_button.set_label("Join call");
-        } else {
+        } else if can_join {
             self.call_status.set_text("No voice call here yet");
             self.call_button.set_label("Start call");
+        } else {
+            self.call_status.set_text("");
+        }
+        // With no call and no way to start one there is nothing to show at all.
+        if !can_join && count == 0 {
+            self.call_panel.set_visible(false);
         }
     }
 
