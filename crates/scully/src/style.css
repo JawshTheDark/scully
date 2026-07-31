@@ -97,12 +97,15 @@ window {
   color: @bad;
 }
 
-/* Buffers belonging to the section above them are indented behind a hairline,
-   so a long list reads as grouped rather than as one flat column. */
+/* Buffers belonging to the section above them are indented, so a long list
+   reads as grouped rather than as one flat column.
+
+   Indent only — an earlier version drew a hairline down the left of each row,
+   but rows are contiguous, so those 1px borders stacked into a single grey bar
+   running the full height of the sidebar. The grouping is already carried by
+   the section headers and the indent. */
 row.buffer-row.child {
-  border-left: 1px solid @border;
-  margin-left: 14px;
-  padding-left: 8px;
+  padding-left: 18px;
 }
 
 /* Which network a row belongs to, shown only in the sections that mix them
