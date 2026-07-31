@@ -46,6 +46,15 @@ window {
   color: @bad;
 }
 
+/* Which network a row belongs to, shown only in the sections that mix them
+   (pinned, DMs, DCC). Muted and small: it disambiguates without competing
+   with the name itself. */
+.buffer-net {
+  color: @fg_muted;
+  font-size: 85%;
+  margin-left: 6px;
+}
+
 row.buffer-row {
   padding: 1px 10px;
   min-height: 0;

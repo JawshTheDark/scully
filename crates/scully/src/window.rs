@@ -1179,6 +1179,11 @@ impl ChatWindow {
             header: Option<String>,
             offline: bool,
             keys: Vec<BufferKey>,
+            /// Section that mixes buffers from several networks (pinned, DMs,
+            /// DCC). Its rows carry the network name, because pulling a buffer
+            /// out of its network otherwise loses the only thing that says
+            /// which `amiantos` this is.
+            cross_network: bool,
         }
         let mut sections: Vec<Section> = Vec::new();
         let sort_key = |k: &BufferKey| (k.is_dm(), k.is_dcc(), k.target.clone());
@@ -1187,7 +1192,7 @@ impl ChatWindow {
         let system: Vec<BufferKey> =
             store.buffers.keys().filter(|k| k.network_id.is_none()).cloned().collect();
         if !system.is_empty() {
-            sections.push(Section { header: None, offline: false, keys: system });
+            sections.push(Section { header: None, offline: false, keys: system, cross_network: false });
         }
 
         // Pinned — across all networks, any buffer kind.
@@ -1203,6 +1208,7 @@ impl ChatWindow {
                 header: Some("★ PINNED".to_string()),
                 offline: false,
                 keys: pinned,
+                cross_network: true,
             });
         }
 
@@ -1221,6 +1227,7 @@ impl ChatWindow {
                 header: Some("✉ DIRECT MESSAGES".to_string()),
                 offline: false,
                 keys: dms,
+                cross_network: true,
             });
         }
 
@@ -1247,6 +1254,7 @@ impl ChatWindow {
                 header: Some(name),
                 offline: net.state != lurker_proto::NetworkState::Connected,
                 keys,
+                cross_network: false,
             });
         }
 
@@ -1263,6 +1271,7 @@ impl ChatWindow {
                 header: Some("⇄ DCC CHATS".to_string()),
                 offline: false,
                 keys: dcc,
+                cross_network: true,
             });
         }
 
@@ -1397,6 +1406,25 @@ impl ChatWindow {
                         .tooltip_text("Voice call in progress — press 📞 or /call to join")
                         .build();
                     row_box.append(&call_badge);
+                }
+
+                // In a section that mixes networks, say which one this is —
+                // the same nick can be two different people on two networks,
+                // and the row is otherwise indistinguishable.
+                if section.cross_network {
+                    if let Some(net) = key
+                        .network_id
+                        .and_then(|id| store.networks.get(&id))
+                        .map(|n| n.name.clone())
+                        .filter(|n| !n.is_empty())
+                    {
+                        row_box.append(
+                            &gtk::Label::builder()
+                                .label(net)
+                                .css_classes(["buffer-net"])
+                                .build(),
+                        );
+                    }
                 }
 
                 let (unread, highlights) =
