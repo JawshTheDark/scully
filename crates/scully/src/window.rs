@@ -59,6 +59,15 @@ pub struct ChatWindow {
     call_status: gtk::Label,
     call_button: gtk::Button,
     overlay: gtk::Overlay,
+    centre_pane: gtk::Box,
+    btn_back: gtk::Button,
+    /// Narrow (phone) layout: one pane at a time instead of three side by
+    /// side. Driven purely by window width, so it works on a Linux phone
+    /// (FuriOS, Phosh) and on a desktop window dragged narrow alike.
+    narrow: Cell<bool>,
+    /// In narrow mode, whether the buffer list is showing rather than the
+    /// conversation.
+    narrow_showing_list: Cell<bool>,
     /// The lightbox currently over the conversation, if any.
     media_overlay: RefCell<Option<gtk::Box>>,
     buffer_pane: gtk::Box,
@@ -236,6 +245,10 @@ impl ChatWindow {
                 .valign(gtk::Align::Center)
                 .build()
         };
+        // Only ever visible in the narrow (phone) layout.
+        let btn_back = tool("\u{2039}", "Back to conversations");
+        btn_back.set_visible(false);
+        header.prepend(&btn_back);
         let btn_addnet = tool("+", "Add a network");
         let btn_search = tool("⌕", "Search messages (Ctrl+F)");
         let btn_popout = tool("⬈", "Pop this channel out into its own window");
@@ -283,6 +296,7 @@ impl ChatWindow {
         centre.append(&scroller);
         centre.append(&status_label);
         centre.append(&entry);
+        let centre_pane = centre.clone();
 
         // ── Right: nicklist ──
         let member_count = gtk::Label::builder().xalign(0.0).css_classes(["member-count"]).build();
@@ -375,6 +389,10 @@ impl ChatWindow {
             btn_read,
             btn_settings,
             overlay,
+            centre_pane,
+            btn_back,
+            narrow: Cell::new(false),
+            narrow_showing_list: Cell::new(true),
             media_overlay: RefCell::new(None),
             buffer_pane,
             member_pane,
@@ -968,6 +986,14 @@ impl ChatWindow {
         });
         self.overlay.add_controller(dismiss);
 
+        // Follow the window width into and out of the phone layout. Width, not
+        // a device check: a desktop window dragged narrow gets the same layout,
+        // which is also the only way to exercise it without a phone.
+        let this = self.clone();
+        self.window.connect_default_width_notify(move |_| this.apply_narrow_layout());
+        let this = self.clone();
+        self.btn_back.connect_clicked(move |_| this.narrow_show_list());
+
         // Window-level shortcuts: Ctrl+F search here, Ctrl+Shift+F search
         // everywhere, Ctrl+K quick switcher, Escape returns a detached buffer
         // to the live present.
@@ -1014,6 +1040,11 @@ impl ChatWindow {
                     if this.dismiss_overlay() {
                         return glib::Propagation::Stop;
                     }
+                    // On a phone, Escape is "back" once nothing is layered.
+                    if this.narrow.get() && !this.narrow_showing_list.get() {
+                        this.narrow_show_list();
+                        return glib::Propagation::Stop;
+                    }
                     // Otherwise only meaningful when detached by a jump.
                     if this.return_to_present() {
                         glib::Propagation::Stop
@@ -1051,6 +1082,8 @@ impl ChatWindow {
 
         let this = self.clone();
         self.text_view.connect_realize(move |_| this.apply_indent());
+        let this = self.clone();
+        self.window.connect_realize(move |_| this.apply_narrow_layout());
 
         // Re-anchor and re-stick whenever the scrollable geometry settles:
         // content added, window resized, or an image finishing its load.
@@ -1214,6 +1247,65 @@ impl ChatWindow {
         if status {
             self.update_status();
         }
+    }
+
+    /// Width below which the three-pane layout stops fitting and Scully shows
+    /// one pane at a time. A FuriPhone is 720 logical pixels wide in portrait;
+    /// a desktop window dragged this narrow wants the same treatment, so the
+    /// trigger is width, never a device check.
+    const NARROW_WIDTH: i32 = 640;
+
+    /// Re-evaluate the phone layout for the current window width.
+    ///
+    /// Narrow: the buffer list and the conversation take turns filling the
+    /// window, and the nicklist is dropped entirely — at this width a list of
+    /// names costs more than it tells you. Wide: hand control back to the
+    /// ordinary settings-driven layout.
+    fn apply_narrow_layout(self: &Rc<Self>) {
+        if self.pinned.is_some() {
+            return; // a popout is already a single pane
+        }
+        let was = self.narrow.get();
+        let now = self.window.width() > 0 && self.window.width() < Self::NARROW_WIDTH;
+        self.narrow.set(now);
+
+        if !now {
+            if was {
+                // Leaving narrow mode: restore whatever the settings say.
+                self.apply_display_settings();
+                self.btn_back.set_visible(false);
+            }
+            return;
+        }
+
+        // Entering narrow mode with a conversation already open should show it,
+        // not bounce the reader back to the list.
+        if !was {
+            self.narrow_showing_list.set(self.active.borrow().is_none());
+        }
+        let list = self.narrow_showing_list.get();
+        self.buffer_pane.set_visible(list);
+        self.centre_pane.set_visible(!list);
+        self.member_pane.set_visible(false);
+        self.btn_back.set_visible(!list);
+    }
+
+    /// In narrow mode, go back to the buffer list.
+    fn narrow_show_list(self: &Rc<Self>) {
+        if !self.narrow.get() {
+            return;
+        }
+        self.narrow_showing_list.set(true);
+        self.apply_narrow_layout();
+    }
+
+    /// In narrow mode, reveal the conversation (after picking a buffer).
+    fn narrow_show_conversation(self: &Rc<Self>) {
+        if !self.narrow.get() {
+            return;
+        }
+        self.narrow_showing_list.set(false);
+        self.apply_narrow_layout();
     }
 
     /// Pull display-relevant settings into this window's cached state and
@@ -1760,6 +1852,8 @@ impl ChatWindow {
         self.update_status();
         self.rebuild_buffer_list();
         self.refresh_voice_ui();
+        // On a phone, choosing a conversation is a navigation: show it.
+        self.narrow_show_conversation();
         if self.window.is_active() {
             self.mark_read_to_tail();
         }

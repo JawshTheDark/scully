@@ -103,6 +103,17 @@ Some of these are easy to get backwards, and the failures are silent:
 - **No optimistic rendering.** Sent messages render when the server echoes them
   back with a real id. (§9.3)
 
+## Small screens (Linux phones)
+
+Below 640 logical pixels Scully shows one pane at a time: the conversation list,
+then the conversation, with a back arrow between them and the nicklist dropped —
+at that width a column of names costs more than it tells you. The trigger is
+window width, never a device check, so a desktop window dragged narrow behaves
+the same way, which is also how you test it without a phone.
+
+This makes it usable on FuriOS (FuriPhone), Phosh, and anything else running
+GTK4 on a handset. Releases include an `aarch64` Linux build for exactly that.
+
 ## Build and run
 
     cargo run -p scully

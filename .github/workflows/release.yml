@@ -1,0 +1,197 @@
+# Build release artefacts for Linux, macOS and Windows and attach them to a
+# GitHub Release.
+#
+# On what these bundles are, honestly: GTK is a shared library, not a crate that
+# links in, so a Scully binary needs a GTK 4 runtime beside it. Linux and macOS
+# builds therefore depend on GTK being installed (one package, one command, and
+# on Linux it is very often already there). The Windows build carries its own
+# DLLs, because expecting a Windows user to install MSYS2 first is not a
+# reasonable thing to ship.
+#
+# The `voice` feature is deliberately NOT built: it pulls a prebuilt libwebrtc,
+# which would add hundreds of megabytes to every artefact for a feature that is
+# off unless the server also runs an SFU. Voice is a `--features voice` build
+# from source, and the README says so.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (e.g. v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install GTK4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev
+      - run: cargo build --release -p scully
+      - name: Stage
+        run: |
+          mkdir -p dist/scully
+          cp target/release/scully dist/scully/
+          cp README.md LICENSE* dist/scully/ 2>/dev/null || true
+          cat > dist/scully/RUN.txt <<'EOF'
+          Scully needs a GTK 4 runtime (4.12 or newer).
+
+            Debian/Ubuntu   sudo apt install libgtk-4-1
+            Fedora          sudo dnf install gtk4
+            Arch            sudo pacman -S gtk4
+
+          Then: ./scully
+          EOF
+          tar -czf scully-linux-x86_64.tar.gz -C dist scully
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: scully-linux-x86_64.tar.gz
+
+  # aarch64 Linux — Raspberry Pi class hardware, ARM laptops, and Linux phones
+  # such as the FuriPhone (FuriOS is Debian-based on arm64).
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install GTK4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev
+      - run: cargo build --release -p scully
+      - name: Stage
+        run: |
+          mkdir -p dist/scully
+          cp target/release/scully dist/scully/
+          cp README.md LICENSE* dist/scully/ 2>/dev/null || true
+          cat > dist/scully/RUN.txt <<'EOF'
+          Scully needs a GTK 4 runtime (4.12 or newer).
+
+            Debian/FuriOS   sudo apt install libgtk-4-1
+            Fedora          sudo dnf install gtk4
+            Arch            sudo pacman -S gtk4
+
+          Then: ./scully
+
+          On a phone-sized screen Scully switches to a single-pane layout
+          automatically; no flag or setting is needed.
+          EOF
+          tar -czf scully-linux-aarch64.tar.gz -C dist scully
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: scully-linux-aarch64.tar.gz
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install GTK4
+        run: brew install gtk4 pkg-config
+      - run: cargo build --release -p scully
+      - name: Stage
+        run: |
+          mkdir -p dist/scully
+          cp target/release/scully dist/scully/
+          cp README.md LICENSE* dist/scully/ 2>/dev/null || true
+          cat > dist/scully/RUN.txt <<'EOF'
+          Scully needs a GTK 4 runtime:
+
+            brew install gtk4
+
+          Then: ./scully
+
+          This binary is unsigned, so the first launch needs
+          right-click > Open, or:  xattr -dr com.apple.quarantine scully
+          EOF
+          tar -czf scully-macos-$(uname -m).tar.gz -C dist scully
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: scully-macos-*.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gtk4
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-rust
+            zip
+      - run: cargo build --release -p scully
+      - name: Stage with its runtime
+        run: |
+          set -eu
+          mkdir -p dist/scully
+          cp target/release/scully.exe dist/scully/
+
+          # Every MinGW DLL the binary resolves to, so the zip runs on a machine
+          # with no MSYS2. ldd lists transitive dependencies, which is what makes
+          # this a one-pass copy rather than a game of whack-a-mole.
+          ldd dist/scully/scully.exe \
+            | grep -i '/mingw64/' \
+            | awk '{print $3}' \
+            | sort -u \
+            | while read -r dll; do cp -u "$dll" dist/scully/; done
+
+          # GTK refuses to start without its compiled settings schemas, and
+          # loads image formats through gdk-pixbuf's loader modules — inline
+          # images are blank without them.
+          mkdir -p dist/scully/share/glib-2.0/schemas
+          cp /mingw64/share/glib-2.0/schemas/*.xml dist/scully/share/glib-2.0/schemas/ 2>/dev/null || true
+          glib-compile-schemas dist/scully/share/glib-2.0/schemas
+          if [ -d /mingw64/lib/gdk-pixbuf-2.0 ]; then
+            cp -r /mingw64/lib/gdk-pixbuf-2.0 dist/scully/lib-gdk-pixbuf
+          fi
+
+          cp README.md dist/scully/ 2>/dev/null || true
+          cat > dist/scully/RUN.txt <<'EOF'
+          Run scully.exe. The GTK runtime is included in this folder — keep the
+          DLLs and the share/ directory next to the executable.
+          EOF
+          cd dist && zip -qr ../scully-windows-x86_64.zip scully
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: scully-windows-x86_64.zip
+
+  release:
+    needs: [linux, linux-arm64, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: Scully ${{ github.event.inputs.tag || github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: artifacts/**/*
