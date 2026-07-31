@@ -1375,18 +1375,23 @@ impl ChatWindow {
 
                 let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
                 header_box.add_css_class("section-header-row");
+                // Baseline, not centre: these are three runs of text at three
+                // different sizes. Centring their BOXES leaves the bigger
+                // glyphs sitting low against the name; aligning their
+                // baselines is what makes them read as one line.
+                header_box.set_baseline_position(gtk::BaselinePosition::Center);
                 let caret = gtk::Label::builder()
                     .label(if folded { "▸" } else { "▾" })
                     // Its own class, not the header's: the caret is sized
                     // independently of the header text.
                     .css_classes(["section-caret"])
-                    .valign(gtk::Align::Center)
+                    .valign(gtk::Align::Baseline)
                     .build();
                 // Connection dot: readable at a glance without reading the name.
                 let dot = gtk::Label::builder()
                     .label("\u{25CF}")
                     .css_classes(["net-dot"])
-                    .valign(gtk::Align::Center)
+                    .valign(gtk::Align::Baseline)
                     .build();
                 if section.offline {
                     dot.add_css_class("offline");
@@ -1395,7 +1400,7 @@ impl ChatWindow {
                     .xalign(0.0)
                     .label(title)
                     .hexpand(true)
-                    .valign(gtk::Align::Center)
+                    .valign(gtk::Align::Baseline)
                     .css_classes(["network-header"])
                     .build();
                 if section.offline {
