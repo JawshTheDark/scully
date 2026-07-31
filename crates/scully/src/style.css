@@ -85,12 +85,19 @@ window {
   color: @bad;
 }
 
+/* The fold caret, sized on its own so the header text is unaffected. */
+.section-caret {
+  color: @fg_muted;
+  font-size: 12pt;
+  padding: 10px 0 4px 0;
+}
+
 /* Connection dot beside a network name: green when the bouncer has that
    network up, red when it doesn't. The state is already in the header's
    colour, but a dot is readable at a glance without reading the word. */
 .net-dot {
   color: @good;
-  font-size: 8pt;
+  font-size: 11pt;
 }
 
 .net-dot.offline {

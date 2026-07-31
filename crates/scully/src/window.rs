@@ -1376,7 +1376,9 @@ impl ChatWindow {
                 let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                 let caret = gtk::Label::builder()
                     .label(if folded { "▸" } else { "▾" })
-                    .css_classes(["network-header"])
+                    // Its own class, not the header's: the caret is sized
+                    // independently of the header text.
+                    .css_classes(["section-caret"])
                     .build();
                 // Connection dot: readable at a glance without reading the name.
                 let dot = gtk::Label::builder()
