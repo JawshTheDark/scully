@@ -38,6 +38,7 @@ fn build(app: &AppRef, parent: &gtk::Window, existing: Option<lurker_client::Net
         .transient_for(parent)
         .destroy_with_parent(true)
         .build();
+    crate::fit_to_screen(&window);
     window.add_css_class("chanctl");
 
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 10);

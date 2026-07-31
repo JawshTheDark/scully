@@ -39,6 +39,7 @@ pub fn open(app: &AppRef, network_id: i64, parent: &gtk::Window) {
         .transient_for(parent)
         .destroy_with_parent(true)
         .build();
+    crate::fit_to_screen(&window);
     window.add_css_class("chanctl");
 
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 8);

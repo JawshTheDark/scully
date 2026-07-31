@@ -82,6 +82,7 @@ fn finder_window(
         builder = builder.transient_for(&parent);
     }
     let window = builder.build();
+    crate::fit_to_screen(&window);
     window.add_css_class("finder");
 
     let entry = gtk::Entry::builder()

@@ -72,6 +72,7 @@ pub fn open(app: &AppRef, key: &BufferKey) {
         builder = builder.transient_for(&parent);
     }
     let window = builder.build();
+    crate::fit_to_screen(&window);
     window.add_css_class("chanctl");
 
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 10);

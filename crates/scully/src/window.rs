@@ -60,6 +60,8 @@ pub struct ChatWindow {
     call_button: gtk::Button,
     overlay: gtk::Overlay,
     centre_pane: gtk::Box,
+    sidebar_header: gtk::Box,
+    btn_members: gtk::Button,
     btn_back: gtk::Button,
     /// Narrow (phone) layout: one pane at a time instead of three side by
     /// side. Driven purely by window width, so it works on a Linux phone
@@ -68,6 +70,10 @@ pub struct ChatWindow {
     /// In narrow mode, whether the buffer list is showing rather than the
     /// conversation.
     narrow_showing_list: Cell<bool>,
+    /// In narrow mode, whether the member list has been pulled up over the
+    /// conversation. There is no room for it beside the messages, but "who is
+    /// in here" is still worth being able to ask.
+    narrow_showing_members: Cell<bool>,
     /// The lightbox currently over the conversation, if any.
     media_overlay: RefCell<Option<gtk::Box>>,
     buffer_pane: gtk::Box,
@@ -249,6 +255,11 @@ impl ChatWindow {
         let btn_back = tool("\u{2039}", "Back to conversations");
         btn_back.set_visible(false);
         header.prepend(&btn_back);
+        // Phone-only: there is no room for the nicklist beside the messages,
+        // so it becomes a view you can raise instead of a pane you lose.
+        let btn_members = tool("\u{1F464}", "Show who is in this channel");
+        btn_members.set_visible(false);
+        header.append(&btn_members);
         let btn_addnet = tool("+", "Add a network");
         let btn_search = tool("⌕", "Search messages (Ctrl+F)");
         let btn_popout = tool("⬈", "Pop this channel out into its own window");
@@ -392,9 +403,12 @@ impl ChatWindow {
             btn_settings,
             overlay,
             centre_pane,
+            sidebar_header,
+            btn_members,
             btn_back,
             narrow: Cell::new(false),
             narrow_showing_list: Cell::new(true),
+            narrow_showing_members: Cell::new(false),
             media_overlay: RefCell::new(None),
             buffer_pane,
             member_pane,
@@ -1011,6 +1025,8 @@ impl ChatWindow {
         });
         let this = self.clone();
         self.btn_back.connect_clicked(move |_| this.narrow_show_list());
+        let this = self.clone();
+        self.btn_members.connect_clicked(move |_| this.narrow_toggle_members());
 
         // Window-level shortcuts: Ctrl+F search here, Ctrl+Shift+F search
         // everywhere, Ctrl+K quick switcher, Escape returns a detached buffer
@@ -1293,9 +1309,12 @@ impl ChatWindow {
 
         if !now {
             if was {
-                // Leaving narrow mode: restore whatever the settings say.
+                // Leaving narrow mode: put the tools back and restore whatever
+                // the settings say about the panes.
+                self.move_tools(false);
                 self.apply_display_settings();
                 self.btn_back.set_visible(false);
+                self.btn_members.set_visible(false);
             }
             return;
         }
@@ -1304,21 +1323,66 @@ impl ChatWindow {
         // not bounce the reader back to the list.
         if !was {
             self.narrow_showing_list.set(self.active.borrow().is_none());
+            self.narrow_showing_members.set(false);
+            // The tools live in the sidebar header, which is hidden while a
+            // conversation is up — so on a phone they move to the conversation
+            // header, where they are reachable from where you actually are.
+            self.move_tools(true);
         }
         let list = self.narrow_showing_list.get();
+        let members = !list && self.narrow_showing_members.get();
         self.buffer_pane.set_visible(list);
-        self.centre_pane.set_visible(!list);
-        self.member_pane.set_visible(false);
+        self.centre_pane.set_visible(!list && !members);
+        self.member_pane.set_visible(members);
         self.btn_back.set_visible(!list);
+        self.btn_members.set_visible(!list);
     }
 
-    /// In narrow mode, go back to the buffer list.
+    /// The narrow layout's Back: members → conversation → list, one step at a
+    /// time, so Back always undoes exactly the last navigation.
     fn narrow_show_list(self: &Rc<Self>) {
         if !self.narrow.get() {
             return;
         }
-        self.narrow_showing_list.set(true);
+        if self.narrow_showing_members.get() {
+            self.narrow_showing_members.set(false);
+        } else {
+            self.narrow_showing_list.set(true);
+        }
         self.apply_narrow_layout();
+    }
+
+    /// Toggle the member list over the conversation (narrow mode only).
+    fn narrow_toggle_members(self: &Rc<Self>) {
+        if !self.narrow.get() || self.narrow_showing_list.get() {
+            return;
+        }
+        let now = !self.narrow_showing_members.get();
+        self.narrow_showing_members.set(now);
+        self.apply_narrow_layout();
+    }
+
+    /// Move the toolbar between the sidebar header (wide) and the conversation
+    /// header (narrow). Moved rather than duplicated so there is only ever one
+    /// of each button, and so their existing handlers keep working.
+    fn move_tools(&self, to_conversation: bool) {
+        let tools = [
+            &self.btn_addnet,
+            &self.btn_search,
+            &self.btn_call,
+            &self.btn_popout,
+            &self.btn_read,
+            &self.btn_settings,
+        ];
+        for b in tools {
+            if to_conversation {
+                self.sidebar_header.remove(b.upcast_ref::<gtk::Widget>());
+                self.header.append(b);
+            } else {
+                self.header.remove(b.upcast_ref::<gtk::Widget>());
+                self.sidebar_header.append(b);
+            }
+        }
     }
 
     /// In narrow mode, reveal the conversation (after picking a buffer).
@@ -1326,6 +1390,7 @@ impl ChatWindow {
         if !self.narrow.get() {
             return;
         }
+        self.narrow_showing_members.set(false);
         self.narrow_showing_list.set(false);
         self.apply_narrow_layout();
     }

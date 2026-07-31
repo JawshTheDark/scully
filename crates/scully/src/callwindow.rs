@@ -25,6 +25,7 @@ pub fn open(app: &AppRef, call: Call, title: &str) {
         .default_width(320)
         .default_height(360)
         .build();
+    crate::fit_to_screen(&window);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
     root.set_margin_top(12);

@@ -95,6 +95,7 @@ impl SettingsWindow {
             builder = builder.transient_for(p);
         }
         let window = builder.build();
+        crate::fit_to_screen(&window);
         window.add_css_class("settings");
 
         let sidebar = gtk::ListBox::builder()
