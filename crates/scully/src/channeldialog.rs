@@ -148,7 +148,12 @@ pub fn open(app: &AppRef, key: &BufferKey) {
     let flags = gtk::FlowBox::builder()
         .orientation(gtk::Orientation::Horizontal)
         .selection_mode(gtk::SelectionMode::None)
-        .min_children_per_line(2)
+        // One column minimum, not two: a phone is ~720px and these labels run
+        // to "No external messages (+n)". Forcing two columns made the row
+        // wider than the window, and the dialog scrolls vertically only — so
+        // the overflow was simply clipped rather than reachable. At one
+        // minimum the box reflows to whatever actually fits.
+        .min_children_per_line(1)
         .max_children_per_line(3)
         .column_spacing(10)
         .row_spacing(2)
@@ -203,9 +208,15 @@ pub fn open(app: &AppRef, key: &BufferKey) {
             Some(text) => format!("{text}  (+{letter})"),
             None => format!("mode +{letter}"),
         };
-        let label =
-            gtk::Label::builder().xalign(0.0).label(&label_text).hexpand(true).build();
-        let value = gtk::Entry::builder().width_chars(12).build();
+        // Ellipsize and a smaller entry, so the row shrinks to a narrow screen
+        // instead of pushing the buttons off the edge.
+        let label = gtk::Label::builder()
+            .xalign(0.0)
+            .label(&label_text)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        let value = gtk::Entry::builder().width_chars(6).hexpand(false).build();
         let set = gtk::Button::builder().label("Set").build();
         let clear = gtk::Button::builder().label("Clear").build();
         row.append(&label);
@@ -263,7 +274,14 @@ pub fn open(app: &AppRef, key: &BufferKey) {
         .build();
     outer.append(&lists_heading);
 
-    let lists_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let lists_row = gtk::FlowBox::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(1)
+        .max_children_per_line(3)
+        .column_spacing(8)
+        .row_spacing(4)
+        .build();
     let list_status = gtk::Label::builder()
         .xalign(0.0)
         .label("Pick a list to load.")
