@@ -1486,10 +1486,22 @@ impl ChatWindow {
                     let weak = self.clone_handle();
                     let offline = section.offline;
                     let net_name = net_title.clone();
+                    // This controller is on the ROW, so its coordinates are
+                    // row-relative — unlike the buffer and nick menus, whose
+                    // gestures sit on the list. Map from the row itself or every
+                    // network's menu opens at the top of the pane.
+                    let anchor = row.clone();
                     right.connect_pressed(move |gesture, _, x, y| {
                         gesture.set_state(gtk::EventSequenceState::Claimed);
                         if let Some(this) = weak.upgrade() {
-                            this.open_network_menu(net_id, &net_name, offline, x as i32, y as i32);
+                            let (px, py) = anchor
+                                .compute_point(
+                                    &this.buffer_pane,
+                                    &gtk::graphene::Point::new(x as f32, y as f32),
+                                )
+                                .map(|p| (p.x() as i32, p.y() as i32))
+                                .unwrap_or((x as i32, y as i32));
+                            this.open_network_menu(net_id, &net_name, offline, px, py);
                         }
                     });
                     row.add_controller(right);
@@ -2582,6 +2594,8 @@ impl ChatWindow {
     ///
     /// These act on the *bouncer's* connection, so they reach every device on
     /// the account — which is why removal asks first.
+    /// `x`/`y` are in the sidebar PANE's coordinate space, already mapped by
+    /// the caller — only it knows which row was clicked.
     fn open_network_menu(
         self: &Rc<Self>,
         net_id: i64,
@@ -2634,11 +2648,9 @@ impl ChatWindow {
 
         let popover = gtk::PopoverMenu::from_model(Some(&model));
         popover.insert_action_group("net", Some(&group));
-        let (px, py) = self
-            .buffer_list
-            .compute_point(&self.buffer_pane, &gtk::graphene::Point::new(x as f32, y as f32))
-            .map(|p| (p.x() as i32, p.y() as i32))
-            .unwrap_or((x, y));
+        // x/y arrive already mapped into the pane by the caller, which is the
+        // only place that knows which row was clicked.
+        let (px, py) = (x, y);
         popover.set_parent(&self.buffer_pane);
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
