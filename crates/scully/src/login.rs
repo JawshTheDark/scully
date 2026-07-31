@@ -28,11 +28,16 @@ pub struct LoginWindow {
 
 impl LoginWindow {
     pub fn new(app: &AppRef) -> Rc<Self> {
+        // Deliberately NOT `resizable(false)`: a phone compositor refuses to
+        // maximise a window that says it cannot resize, which left the login
+        // form floating mid-screen surrounded by wallpaper.
         let window = gtk::ApplicationWindow::builder()
             .application(&app.gtk_app)
             .title("Scully — connect")
-            .resizable(false)
+            .default_width(420)
+            .default_height(520)
             .build();
+        crate::fit_to_screen(&window);
 
         let heading = gtk::Label::builder().label("scully").css_classes(["brand"]).build();
         let subtitle = gtk::Label::builder()

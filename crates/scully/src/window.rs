@@ -362,6 +362,8 @@ impl ChatWindow {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&outer));
         window.set_child(Some(&overlay));
+        // On a handset the chat window should own the screen too.
+        crate::fit_to_screen(&window);
 
         let this = Rc::new(ChatWindow {
             app: app.clone(),

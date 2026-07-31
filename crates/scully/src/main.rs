@@ -135,6 +135,23 @@ pub fn main_app() -> Option<AppRef> {
     existing_app()
 }
 
+/// Maximise a window when the screen is phone-sized.
+///
+/// A handset compositor (Phosh on FuriOS, for one) will not maximise a window
+/// that declares itself non-resizable, and a modest desktop default size then
+/// floats in the middle of the display with wallpaper around it. Deciding from
+/// the monitor's own geometry keeps this a property of the screen rather than a
+/// device check.
+pub fn fit_to_screen(window: &impl IsA<gtk::Window>) {
+    let Some(display) = gtk::gdk::Display::default() else { return };
+    let Some(obj) = display.monitors().item(0) else { return };
+    let Ok(monitor) = obj.downcast::<gtk::gdk::Monitor>() else { return };
+    let geo = monitor.geometry();
+    if geo.width() <= 800 || geo.height() <= 900 {
+        window.as_ref().set_maximized(true);
+    }
+}
+
 /// Open another full window onto the same store and socket.
 pub fn open_chat_window(app: &AppRef) {
     let win = window::ChatWindow::new(app);

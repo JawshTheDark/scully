@@ -258,8 +258,12 @@ row.buffer-row:selected label {
   color: @fg;
   border: 1px solid @border;
   border-radius: 2px;
-  padding: 8px;
-  min-width: 320px;
+  /* Sized for a finger, not a mouse: 44px is the usual minimum touch target,
+     and the fields must be able to SHRINK to a phone's width — a min-width of
+     320px plus margins does not fit a 720px screen once scaled. */
+  padding: 12px 10px;
+  min-height: 44px;
+  min-width: 0;
 }
 
 .login entry:focus,
@@ -273,7 +277,8 @@ button.connect {
   color: @bg;
   border: none;
   border-radius: 2px;
-  padding: 8px;
+  padding: 12px;
+  min-height: 44px;
   font-weight: 700;
 }
 
@@ -286,6 +291,22 @@ button.connect:disabled {
  * set via `max_width_chars` in login.rs. */
 .login-status {
   color: @warn;
+}
+
+/* The window's own title bar. Left unstyled it is the toolkit's light default,
+   which against this theme reads as a stray white band across the top — very
+   obvious on a phone, where the window fills the screen. */
+headerbar,
+.titlebar,
+windowhandle {
+  background-color: @bg_soft;
+  color: @fg;
+  border-bottom: 1px solid @border;
+}
+
+headerbar label,
+.titlebar label {
+  color: @fg;
 }
 
 /* ── Toolbar ──────────────────────────────────────────────────────────── */
