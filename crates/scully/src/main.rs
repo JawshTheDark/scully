@@ -76,7 +76,15 @@ fn main() -> glib::ExitCode {
     let app_id = std::env::var("SCULLY_APP_ID").unwrap_or_else(|_| APP_ID.to_string());
     let gtk_app = gtk::Application::builder().application_id(&app_id).build();
 
-    gtk_app.connect_startup(|_| load_css());
+    gtk_app.connect_startup(|_| {
+        load_css();
+        // Name the themed icon for every window. On Wayland the compositor
+        // finds an app's icon by matching the surface's app_id to a .desktop
+        // file of the same name — which is why the desktop file and the icon
+        // are both named for the application id rather than "scully". Without
+        // this the shell falls back to a generic placeholder.
+        gtk::Window::set_default_icon_name(APP_ID);
+    });
 
     gtk_app.connect_activate(|gtk_app| {
         // A second launch reuses the running instance: presence and read state

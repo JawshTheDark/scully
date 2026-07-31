@@ -74,8 +74,8 @@ jobs:
                    pkg/usr/share/icons/hicolor/scalable/apps \
                    pkg/usr/share/doc/scully
           install -m755 target/release/scully              pkg/usr/bin/scully
-          install -m644 packaging/scully.desktop           pkg/usr/share/applications/scully.desktop
-          install -m644 packaging/scully.svg               pkg/usr/share/icons/hicolor/scalable/apps/scully.svg
+          install -m644 packaging/io.jawsh.Scully.desktop  pkg/usr/share/applications/io.jawsh.Scully.desktop
+          install -m644 packaging/io.jawsh.Scully.svg      pkg/usr/share/icons/hicolor/scalable/apps/io.jawsh.Scully.svg
           install -m644 README.md                          pkg/usr/share/doc/scully/README.md
 
       - name: Build .deb
@@ -122,8 +122,8 @@ jobs:
           cp -a %{_sourcedir}/tree/. %{buildroot}/
           %files
           /usr/bin/scully
-          /usr/share/applications/scully.desktop
-          /usr/share/icons/hicolor/scalable/apps/scully.svg
+          /usr/share/applications/io.jawsh.Scully.desktop
+          /usr/share/icons/hicolor/scalable/apps/io.jawsh.Scully.svg
           /usr/share/doc/scully/README.md
           EOF
           mkdir -p rpmbuild/SOURCES/tree
