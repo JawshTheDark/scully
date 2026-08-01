@@ -377,7 +377,7 @@ pub fn open(app: &AppRef, key: &BufferKey) {
                     store
                         .buffer(key)
                         .and_then(|b| b.members.get(&lurker_proto::fold(&nick)))
-                        .map(|m| crate::nickmenu::Rank::from_mode(m.modes.first().map(String::as_str)))
+                        .map(|m| crate::nickmenu::Rank::from_mode(m.highest_mode()))
                 })
                 .unwrap_or(crate::nickmenu::Rank::None)
         };

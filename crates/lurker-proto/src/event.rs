@@ -207,16 +207,31 @@ pub struct Member {
 }
 
 impl Member {
+    /// The member's highest prefix mode letter, ranked `q a o h v`.
+    ///
+    /// Ranked by SCANNING, never by taking `modes[0]`: the array is in
+    /// grant order, so someone op'd first and given owner later reads
+    /// `["o","q"]` — and `first()` showed them as `@` until they happened to
+    /// lose the op. (Matches the web's `memberPrefix.ts`.)
+    pub fn highest_mode(&self) -> Option<&str> {
+        for letter in ["q", "a", "o", "h", "v"] {
+            if self.modes.iter().any(|m| m == letter) {
+                return Some(letter);
+            }
+        }
+        None
+    }
+
     /// Map the highest prefix mode to its display sigil.
     pub fn sigil(&self) -> Option<char> {
-        self.modes.first().and_then(|m| match m.as_str() {
-            "q" => Some('~'),
-            "a" => Some('&'),
-            "o" => Some('@'),
-            "h" => Some('%'),
-            "v" => Some('+'),
+        match self.highest_mode() {
+            Some("q") => Some('~'),
+            Some("a") => Some('&'),
+            Some("o") => Some('@'),
+            Some("h") => Some('%'),
+            Some("v") => Some('+'),
             _ => None,
-        })
+        }
     }
 }
 
@@ -522,5 +537,25 @@ mod tests {
         assert!(!EventType::Kick.is_noise());
         assert!(!EventType::Topic.is_noise());
         assert!(!EventType::Invite.is_noise());
+    }
+}
+
+#[cfg(test)]
+mod member_tests {
+    use super::*;
+
+    #[test]
+    fn the_highest_mode_wins_regardless_of_grant_order() {
+        // Reported live: op'd first, owner'd second → ["o","q"] → shown as @
+        // until -o removed the op and the ~ finally appeared.
+        let m = Member { modes: vec!["o".into(), "q".into()], ..Default::default() };
+        assert_eq!(m.highest_mode(), Some("q"));
+        assert_eq!(m.sigil(), Some('~'));
+
+        let m = Member { modes: vec!["v".into(), "h".into()], ..Default::default() };
+        assert_eq!(m.sigil(), Some('%'));
+
+        let m = Member { modes: vec![], ..Default::default() };
+        assert_eq!(m.sigil(), None);
     }
 }

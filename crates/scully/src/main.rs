@@ -31,6 +31,7 @@ mod nickmenu;
 mod paths;
 mod settings;
 mod split;
+mod uploadersdialog;
 mod theme;
 #[cfg(feature = "voice")]
 mod voice;

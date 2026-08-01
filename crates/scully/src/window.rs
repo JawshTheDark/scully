@@ -88,6 +88,9 @@ pub struct ChatWindow {
     btn_members_back: gtk::Button,
     btn_members: gtk::Button,
     btn_attach: gtk::Button,
+    btn_format: gtk::Button,
+    suggestion_strip: gtk::Box,
+    strip_scroll: gtk::ScrolledWindow,
     btn_back: gtk::Button,
     /// Narrow (phone) layout: one pane at a time instead of three side by
     /// side. Driven purely by window width, so it works on a Linux phone
@@ -378,9 +381,37 @@ impl ChatWindow {
             .css_classes(["toolbtn", "attach"])
             .valign(gtk::Align::Center)
             .build();
+        // `input.show_format_button`: the mIRC palette. Hidden until the
+        // setting says otherwise (apply_display_settings), like the web.
+        let btn_format = gtk::Button::builder()
+            .icon_name("color-select-symbolic")
+            .tooltip_text("Formatting: colours, bold, italic…")
+            .css_classes(["toolbtn", "attach"])
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+
+        // The suggestion strip: completion candidates as tappable chips above
+        // the composer — the phone's substitute for Tab, and available on the
+        // desktop via `input.suggestion_strip_on_desktop`.
+        let suggestion_strip = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(4)
+            .css_classes(["suggestion-strip"])
+            .visible(false)
+            .build();
+        let strip_scroll = gtk::ScrolledWindow::builder()
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(gtk::PolicyType::External)
+            .child(&suggestion_strip)
+            .visible(false)
+            .build();
+        centre.append(&strip_scroll);
+
         let composer_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         composer_row.add_css_class("composer-row");
         composer_row.append(&btn_attach);
+        composer_row.append(&btn_format);
         composer_row.append(&entry);
         centre.append(&composer_row);
         let centre_pane = centre.clone();
@@ -505,6 +536,9 @@ impl ChatWindow {
             btn_members_back,
             btn_members,
             btn_attach,
+            btn_format,
+            suggestion_strip,
+            strip_scroll,
             btn_back,
             narrow: Cell::new(false),
             narrow_showing_list: Cell::new(true),
@@ -1033,6 +1067,18 @@ impl ChatWindow {
                 {
                     return glib::Propagation::Stop;
                 }
+                // mIRC formatting, matching the web's shortcuts. These work
+                // whether or not the palette button is shown.
+                let code = match keyval {
+                    gtk::gdk::Key::b | gtk::gdk::Key::B => Some("\u{02}"),
+                    gtk::gdk::Key::i | gtk::gdk::Key::I => Some("\u{1D}"),
+                    gtk::gdk::Key::u | gtk::gdk::Key::U => Some("\u{1F}"),
+                    _ => None,
+                };
+                if let Some(code) = code {
+                    this.insert_format(code);
+                    return glib::Propagation::Stop;
+                }
                 return glib::Propagation::Proceed;
             }
             match keyval {
@@ -1067,10 +1113,14 @@ impl ChatWindow {
             // Any edit invalidates a pending split confirmation — the message
             // being confirmed is no longer the message in the box.
             this.pending_split_confirm.set(false);
+            this.refresh_suggestion_strip();
             if !entry.text().is_empty() {
                 this.signal_typing("active");
             }
         });
+
+        let this = self.clone();
+        self.btn_format.connect_clicked(move |_| this.open_format_popover());
 
         // The status-bar clock (`look.bar.time_format`) ticks once a second
         // while a format is set. Weak, as below: the ticker must not keep a
@@ -1685,6 +1735,8 @@ impl ChatWindow {
         self.collapse_timestamps.set(get_bool("look.message.collapse_timestamps", true));
         self.show_mode_prefix.set(get_bool("look.nick.show_mode_prefix", false));
         self.keep_position_on_send.set(get_bool("chat.keep_position_on_send", false));
+        // `input.show_format_button`: the palette lives in the composer row.
+        self.btn_format.set_visible(get_bool("input.show_format_button", false));
         *self.unread_display.borrow_mut() = get_str("look.buffer_list.unread_display", "full");
         self.unread_bold.set(get_bool("look.buffer_list.unread_bold", false));
         self.lag_min_show_ms.set(get_int("look.bar.lag_min_show_ms", 500));
@@ -1789,6 +1841,18 @@ impl ChatWindow {
         );
         let notification = gio::Notification::new(&title);
         notification.set_body(Some(&body));
+        // Tapping the banner lands you in the conversation it came from —
+        // the web behaves the same. The action already exists for exactly
+        // this (see install_actions); the target is "<networkId>/<target>".
+        let spec = format!(
+            "{}/{}",
+            key.network_id.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
+            key.target
+        );
+        notification.set_default_action_and_target_value(
+            "app.activate-buffer",
+            Some(&spec.to_variant()),
+        );
         self.app.gtk_app.send_notification(None, &notification);
     }
 
@@ -3259,7 +3323,7 @@ impl ChatWindow {
         store
             .buffer(&key)
             .and_then(|b| b.members.get(&lurker_proto::fold(&my_nick)))
-            .map(|m| crate::nickmenu::Rank::from_mode(m.modes.first().map(String::as_str)))
+            .map(|m| crate::nickmenu::Rank::from_mode(m.highest_mode()))
             .unwrap_or(crate::nickmenu::Rank::None)
     }
 
@@ -4335,7 +4399,7 @@ impl ChatWindow {
         let mut members: Vec<_> = buf.members.values().collect();
         // Ops first, then by nick — the conventional IRC nicklist order.
         members.sort_by_key(|m| {
-            let rank = match m.modes.first().map(String::as_str) {
+            let rank = match m.highest_mode() {
                 Some("q") => 0,
                 Some("a") => 1,
                 Some("o") => 2,
@@ -4601,14 +4665,38 @@ impl ChatWindow {
             return;
         }
 
-        let (anchor, prefix, kind) = crate::input::classify(&text, cursor);
+        let Some((anchor, kind, candidates)) = self.completion_candidates(&text, cursor)
+        else {
+            return;
+        };
+
+        if candidates.is_empty() {
+            return;
+        }
+        // Shift+Tab with no cycle in progress starts from the last candidate.
+        let first = if direction < 0 { candidates.len() - 1 } else { 0 };
+        let nick = candidates[first].clone();
+        *self.completion.borrow_mut() = Some((anchor as i32, candidates, first));
+        let (new_text, new_cursor) = crate::input::complete(&text, cursor, anchor, &nick, kind);
+        self.entry.set_text(&new_text);
+        self.entry.set_position(new_cursor as i32);
+    }
+
+    /// The completion candidates at a cursor position — the source both Tab
+    /// and the suggestion strip draw from, so the two can never disagree.
+    fn completion_candidates(
+        &self,
+        text: &str,
+        cursor: usize,
+    ) -> Option<(usize, crate::input::Token, Vec<String>)> {
+        let (anchor, prefix, kind) = crate::input::classify(text, cursor);
         // A bare "/" is a legitimate "what can I type?" prompt, so commands may
         // complete from an empty prefix; nicks and channels may not — Tab on
         // nothing would dump the whole nicklist into the composer.
         if prefix.is_empty() && kind != crate::input::Token::Command {
-            return;
+            return None;
         }
-        let Some(key) = self.active.borrow().clone() else { return };
+        let key = self.active.borrow().clone()?;
 
         let candidates = match kind {
             crate::input::Token::Command => {
@@ -4631,7 +4719,7 @@ impl ChatWindow {
             }
             crate::input::Token::Nick => {
                 let store = self.app.store.borrow();
-                let Some(buf) = store.buffer(&key) else { return };
+                let buf = store.buffer(&key)?;
                 let own = key
                     .network_id
                     .and_then(|id| store.networks.get(&id))
@@ -4646,17 +4734,126 @@ impl ChatWindow {
                 crate::input::candidates(&prefix, recent, members, own.as_deref())
             }
         };
+        Some((anchor, kind, candidates))
+    }
 
-        if candidates.is_empty() {
+    /// Insert an IRC formatting code at the cursor (composer keyboard
+    /// shortcuts and the palette popover both land here).
+    fn insert_format(&self, code: &str) {
+        let mut pos = self.entry.position();
+        self.entry.insert_text(code, &mut pos);
+        self.entry.set_position(pos);
+        self.entry.grab_focus_without_selecting();
+    }
+
+    /// The mIRC palette popover (`input.show_format_button`): the 16 colour
+    /// slots, the style toggles, and clear-formatting — the same surface as
+    /// the web's picker, inserting the same control codes.
+    fn open_format_popover(self: &Rc<Self>) {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        root.set_margin_top(8);
+        root.set_margin_bottom(8);
+        root.set_margin_start(8);
+        root.set_margin_end(8);
+
+        let styles = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        for (label, code, tip) in [
+            ("B", "\u{02}", "Bold (Ctrl+B)"),
+            ("I", "\u{1D}", "Italic (Ctrl+I)"),
+            ("U", "\u{1F}", "Underline (Ctrl+U)"),
+            ("S", "\u{1E}", "Strikethrough"),
+            ("✕", "\u{0F}", "Clear formatting from here"),
+        ] {
+            let b = gtk::Button::builder()
+                .label(label)
+                .tooltip_text(tip)
+                .css_classes(["toolbtn"])
+                .build();
+            let this = self.clone();
+            let code = code.to_string();
+            b.connect_clicked(move |_| this.insert_format(&code));
+            styles.append(&b);
+        }
+        root.append(&styles);
+
+        // Colour swatches: user palette slots where set, defaults otherwise.
+        // A swatch inserts \x03NN — two digits always, so typing a digit
+        // right after can't mutate the colour.
+        let grid = gtk::Grid::builder().row_spacing(4).column_spacing(4).build();
+        let user = self.mirc_palette.borrow().clone();
+        for i in 0..16u8 {
+            let colour = user
+                .get(i as usize)
+                .cloned()
+                .flatten()
+                .or_else(|| mirc::color_hex(i).map(str::to_string))
+                .unwrap_or_else(|| "#888888".to_string());
+            let swatch = gtk::Button::builder()
+                .tooltip_text(format!("Colour {i}"))
+                .css_classes(["mirc-swatch"])
+                .build();
+            swatch.set_child(Some(
+                &gtk::Label::builder()
+                    .use_markup(true)
+                    .label(format!("<span foreground=\"{colour}\">⬤</span>"))
+                    .build(),
+            ));
+            let this = self.clone();
+            swatch.connect_clicked(move |_| this.insert_format(&format!("\u{03}{i:02}")));
+            grid.attach(&swatch, (i % 8) as i32, (i / 8) as i32, 1, 1);
+        }
+        root.append(&grid);
+
+        let popover = gtk::Popover::builder().child(&root).build();
+        popover.set_parent(&self.btn_format);
+        popover.connect_closed(|p| p.unparent());
+        popover.popup();
+    }
+
+    /// Rebuild the suggestion strip for the current composer state. Chips are
+    /// the same candidates Tab cycles through; tapping one applies it exactly
+    /// as Tab would.
+    fn refresh_suggestion_strip(self: &Rc<Self>) {
+        let on = self.narrow.get()
+            || self
+                .app
+                .setting("input.suggestion_strip_on_desktop")
+                .as_bool()
+                .unwrap_or(false);
+        if !on {
+            self.strip_scroll.set_visible(false);
             return;
         }
-        // Shift+Tab with no cycle in progress starts from the last candidate.
-        let first = if direction < 0 { candidates.len() - 1 } else { 0 };
-        let nick = candidates[first].clone();
-        *self.completion.borrow_mut() = Some((anchor as i32, candidates, first));
-        let (new_text, new_cursor) = crate::input::complete(&text, cursor, anchor, &nick, kind);
-        self.entry.set_text(&new_text);
-        self.entry.set_position(new_cursor as i32);
+        clear_box(&self.suggestion_strip);
+        let text = self.entry.text().to_string();
+        let cursor = self.entry.position().max(0) as usize;
+        let found = self.completion_candidates(&text, cursor);
+        let Some((anchor, kind, candidates)) = found else {
+            self.strip_scroll.set_visible(false);
+            return;
+        };
+        if candidates.is_empty() {
+            self.strip_scroll.set_visible(false);
+            return;
+        }
+        for value in candidates.into_iter().take(12) {
+            let chip = gtk::Button::builder()
+                .label(&value)
+                .css_classes(["suggestion-chip"])
+                .build();
+            let this = self.clone_handle();
+            let text = text.clone();
+            chip.connect_clicked(move |_| {
+                let Some(this) = this.upgrade() else { return };
+                let (new_text, new_cursor) =
+                    crate::input::complete(&text, cursor, anchor, &value, kind);
+                this.entry.set_text(&new_text);
+                this.entry.set_position(new_cursor as i32);
+                this.entry.grab_focus_without_selecting();
+            });
+            self.suggestion_strip.append(&chip);
+        }
+        self.strip_scroll.set_visible(true);
     }
 
     // ── Input ─────────────────────────────────────────────────────────────
@@ -4883,6 +5080,11 @@ impl ChatWindow {
                 }
                 return true;
             }
+            // Where uploads go — the uploader picker/manager (#514).
+            ("uploads" | "uploaders", _) => {
+                crate::uploadersdialog::open(&self.app);
+                return true;
+            }
             ("search" | "find", _) => {
                 if !args.is_empty() {
                     self.app.search(&args, self.active.borrow().as_ref());
@@ -5041,6 +5243,12 @@ fn event_unix(e: &lurker_proto::MessageEvent) -> Option<i64> {
         .as_deref()
         .and_then(|raw| glib::DateTime::from_iso8601(raw, None).ok())
         .map(|d| d.to_unix())
+}
+
+fn clear_box(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
 }
 
 fn clear_list(list: &gtk::ListBox) {

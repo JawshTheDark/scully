@@ -198,6 +198,20 @@ impl SettingsWindow {
             return;
         }
 
+        // The uploads category gets a real management surface at the top:
+        // the uploader picker (#514) is an API, not a registry setting, so
+        // the generated rows alone can't reach it.
+        if category == "uploads" {
+            let btn = gtk::Button::builder()
+                .label("Manage uploaders…")
+                .halign(gtk::Align::Start)
+                .css_classes(["toolbtn"])
+                .build();
+            let app = self.app.clone();
+            btn.connect_clicked(move |_| crate::uploadersdialog::open(&app));
+            self.pane.append(&btn);
+        }
+
         let registry = self.app.settings_registry.borrow();
         let mut last_group: Option<&str> = None;
 

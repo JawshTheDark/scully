@@ -144,6 +144,21 @@ pub struct SettingOption {
     pub self_hosted_only: bool,
 }
 
+/// `GET /api/uploaders` response. Uploader rows and driver descriptors ride
+/// as JSON — see [`Rest::uploaders`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadersInfo {
+    #[serde(default)]
+    pub uploaders: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub selected_id: Option<i64>,
+    #[serde(default)]
+    pub allow_user_defined: bool,
+    #[serde(default)]
+    pub drivers: Vec<serde_json::Value>,
+}
+
 /// `GET /api/settings/bootstrap` → the registry plus this account's values.
 #[derive(Debug, Default)]
 pub struct SettingsBootstrap {
@@ -330,6 +345,70 @@ impl Rest {
     }
 
     /// `GET /api/networks` — the roster, and a token-validity check.
+    /// `GET /api/uploaders` — the uploaders you may send to, the drivers that
+    /// describe them, and your current selection. Rows and drivers stay as
+    /// JSON: the form the client renders is the driver's own `configSchema`,
+    /// which is the whole point of the API (#514) — a new driver must be a
+    /// new form with no client change, so typing the schema here would defeat
+    /// it.
+    pub async fn uploaders(&self) -> Result<UploadersInfo> {
+        let resp = self.authed(self.http.get(self.url("api/uploaders")?)).send().await?;
+        Ok(Self::check(resp).await?.json().await?)
+    }
+
+    /// `PUT /api/uploaders/selection` — choose the default uploader; `None`
+    /// falls back to the instance default.
+    pub async fn select_uploader(&self, id: Option<i64>) -> Result<()> {
+        let resp = self
+            .authed(self.http.put(self.url("api/uploaders/selection")?))
+            .json(&serde_json::json!({ "id": id }))
+            .send()
+            .await?;
+        Self::check(resp).await?;
+        Ok(())
+    }
+
+    /// `POST /api/uploaders` — stand up a personal uploader.
+    pub async fn create_uploader(
+        &self,
+        driver: &str,
+        label: &str,
+        values: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .authed(self.http.post(self.url("api/uploaders")?))
+            .json(&serde_json::json!({ "driver": driver, "label": label, "values": values }))
+            .send()
+            .await?;
+        Ok(Self::check(resp).await?.json().await?)
+    }
+
+    /// `PATCH /api/uploaders/:id`. Secrets are write-only server-side: omit a
+    /// secret field to keep the stored one.
+    pub async fn update_uploader(
+        &self,
+        id: i64,
+        label: &str,
+        values: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .authed(self.http.patch(self.url(&format!("api/uploaders/{id}"))?))
+            .json(&serde_json::json!({ "label": label, "values": values }))
+            .send()
+            .await?;
+        Ok(Self::check(resp).await?.json().await?)
+    }
+
+    /// `DELETE /api/uploaders/:id`.
+    pub async fn delete_uploader(&self, id: i64) -> Result<()> {
+        let resp = self
+            .authed(self.http.delete(self.url(&format!("api/uploaders/{id}"))?))
+            .send()
+            .await?;
+        Self::check(resp).await?;
+        Ok(())
+    }
+
     pub async fn networks(&self) -> Result<Vec<NetworkRow>> {
         let resp = self.authed(self.http.get(self.url("api/networks")?)).send().await?;
         let env: NetworksEnvelope = Self::check(resp).await?.json().await?;

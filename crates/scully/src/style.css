@@ -570,3 +570,38 @@ button.toolbtn.attach {
   min-height: 34px;
   border: none;
 }
+
+/* ── Composer extras ── */
+
+/* The suggestion strip: completion candidates as tappable chips. */
+.suggestion-strip {
+  padding: 4px 8px;
+  background-color: @bg_soft;
+  border-top: 1px solid @border;
+}
+
+button.suggestion-chip {
+  background-image: none;
+  background-color: @bg_raised;
+  color: @fg;
+  border: 1px solid @border;
+  border-radius: 3px;
+  padding: 2px 10px;
+  min-height: 30px;
+}
+
+button.suggestion-chip:hover {
+  border-color: @accent;
+}
+
+/* mIRC palette swatches: the glyph carries the colour; the button is chrome. */
+button.mirc-swatch {
+  background-image: none;
+  background-color: @bg_soft;
+  border: 1px solid @border;
+  border-radius: 3px;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  font-size: 13pt;
+}
