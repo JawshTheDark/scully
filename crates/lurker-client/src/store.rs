@@ -74,6 +74,10 @@ pub enum StoreEvent {
     /// A tracked peer's online/away state changed on this network, so any
     /// friend row showing it should be recomputed.
     PresenceChanged(i64),
+    /// A friend flagged "notify when online" just came online (a real
+    /// offline→online transition, per the server's `cameOnline`). Carries the
+    /// contact's display name, ready to show.
+    FriendCameOnline(String),
     /// A non-fatal server error frame.
     Error(String),
 }
@@ -752,6 +756,15 @@ impl Store {
                 if now != Presence::Unknown && now != was {
                     self.presence.insert((net, lurker_proto::fold(nick)), now);
                     out.push(StoreEvent::PresenceChanged(net));
+                }
+                // `cameOnline` marks a real offline→online transition — the
+                // server's own edge detection, not derivable from `was`/`now`
+                // (a fresh connect hydrates presence without any transition).
+                // Only friends who asked get the event.
+                if event.came_online == Some(true) {
+                    if let Some(c) = self.contact_for(net, nick).filter(|c| c.notify_online) {
+                        out.push(StoreEvent::FriendCameOnline(c.display_name.clone()));
+                    }
                 }
             }
             return;

@@ -144,6 +144,25 @@ pub fn main_app() -> Option<AppRef> {
     existing_app()
 }
 
+/// Whether this machine is a phone-class device, decided once from the
+/// primary monitor's geometry — the same test `fit_to_screen` applies.
+///
+/// The web client picks its device class by viewport; Scully has one settings
+/// store shared by every window, and the paging unit requested from the
+/// server must match the unit rendered (§8), so the class is a property of
+/// the DEVICE here, never of one window's current width. This is what routes
+/// `chat.events.mobile` and `look.font.size.mobile`.
+pub fn is_mobile_class() -> bool {
+    static MOBILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MOBILE.get_or_init(|| {
+        let Some(display) = gtk::gdk::Display::default() else { return false };
+        let Some(obj) = display.monitors().item(0) else { return false };
+        let Ok(monitor) = obj.downcast::<gtk::gdk::Monitor>() else { return false };
+        let geo = monitor.geometry();
+        geo.width() <= 800 || geo.height() <= 900
+    })
+}
+
 /// Maximise a window when the screen is phone-sized.
 ///
 /// A handset compositor (Phosh on FuriOS, for one) will not maximise a window

@@ -329,7 +329,11 @@ impl App {
         if let Some(app) = crate::main_app() {
             crate::theme::apply(&app);
         }
-        let tier = self.setting("chat.events");
+        // Phone-class devices read the mobile tier key, mirroring the web's
+        // viewport split — the two device classes tune noise independently.
+        let tier_key =
+            if crate::is_mobile_class() { "chat.events.mobile" } else { "chat.events" };
+        let tier = self.setting(tier_key);
         self.event_mode.set(match tier.as_str() {
             Some("none") => EventMode::None,
             Some("smart") => EventMode::Smart,

@@ -947,3 +947,35 @@ fn peer_presence_never_materializes_a_buffer() {
     assert_eq!(store.buffers.len(), before);
     assert!(out.iter().any(|e| matches!(e, StoreEvent::PresenceChanged(1))));
 }
+
+#[test]
+fn a_watched_friend_coming_online_emits_the_notify_event() {
+    let mut store = connected_store();
+    apply(
+        &mut store,
+        contacts_snapshot(json!([
+            { "id": 1, "displayName": "amiantos", "notifyOnline": true,
+              "targets": [{ "networkId": 1, "nick": "amiantos", "isPrimary": true }] },
+            { "id": 2, "displayName": "quiet", "notifyOnline": false,
+              "targets": [{ "networkId": 1, "nick": "quiet", "isPrimary": true }] }
+        ])),
+    );
+    // cameOnline is the server's own edge detection; a presence row without it
+    // (a fresh connect hydrating state) must not fire.
+    let out = apply(&mut store, presence_event(1, "amiantos", "online"));
+    assert!(!out.iter().any(|e| matches!(e, StoreEvent::FriendCameOnline(_))));
+
+    let mut ev = presence_event(1, "AmIaNtOs", "online");
+    ev["cameOnline"] = serde_json::Value::Bool(true);
+    let out = apply(&mut store, ev);
+    assert!(
+        out.iter().any(|e| matches!(e, StoreEvent::FriendCameOnline(n) if n == "amiantos")),
+        "folded-nick match, carries the display name"
+    );
+
+    // A friend who did not ask stays silent.
+    let mut ev = presence_event(1, "quiet", "online");
+    ev["cameOnline"] = serde_json::Value::Bool(true);
+    let out = apply(&mut store, ev);
+    assert!(!out.iter().any(|e| matches!(e, StoreEvent::FriendCameOnline(_))));
+}

@@ -577,6 +577,17 @@ impl ChatWindow {
         self.window.present();
     }
 
+    /// Whether this is the first (main) chat window — the one that owns
+    /// app-wide side effects like notifications, so N open windows don't each
+    /// raise the same alert.
+    fn is_primary(&self) -> bool {
+        self.app
+            .chat_windows
+            .borrow()
+            .first()
+            .is_some_and(|w| w.observer_id.get() == self.observer_id.get())
+    }
+
     /// The buffer this window is pinned to, if it is a popout.
     pub fn pinned_key(&self) -> Option<&BufferKey> {
         self.pinned.as_ref()
@@ -1312,6 +1323,22 @@ impl ChatWindow {
                 // Both change what the FRIENDS section shows: who is in it, and
                 // which of them is reachable (which also sets the header dot).
                 StoreEvent::ContactsChanged | StoreEvent::PresenceChanged(_) => relist = true,
+                StoreEvent::FriendCameOnline(name) => {
+                    // `notifications.friend_online.enabled` — the per-category
+                    // gate; the per-friend gate (notify_online) already ran in
+                    // the store. Only the first window raises it, or N open
+                    // windows mean N identical notifications.
+                    if self.is_primary()
+                        && self
+                            .app
+                            .setting("notifications.friend_online.enabled")
+                            .as_bool()
+                            .unwrap_or(true)
+                    {
+                        let n = gio::Notification::new(&format!("{name} is online"));
+                        self.app.gtk_app.send_notification(None, &n);
+                    }
+                }
                 StoreEvent::BufferListChanged => {
                     relist = true;
                     status = true;
@@ -3926,12 +3953,7 @@ impl ChatWindow {
                 }
             };
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let cap = this
-                .app
-                .store
-                .borrow()
-                .max_upload_bytes
-                .unwrap_or(MAX_UPLOAD_FALLBACK);
+            let cap = this.upload_cap();
             if size > cap {
                 this.status_label.set_text(&format!(
                     "{name} is {} — this server accepts up to {}",
@@ -3956,7 +3978,27 @@ impl ChatWindow {
         });
     }
 
+    /// The effective upload ceiling: the smaller of what the server reports
+    /// and the user's own `uploads.image.max_upload_mb` — the account-wide
+    /// self-imposed cap the website honours, so a limit set there binds here.
+    fn upload_cap(&self) -> u64 {
+        let server = self.app.store.borrow().max_upload_bytes.unwrap_or(MAX_UPLOAD_FALLBACK);
+        let user_mb = self.app.setting("uploads.image.max_upload_mb").as_u64().unwrap_or(0);
+        if user_mb > 0 { server.min(user_mb.saturating_mul(1024 * 1024)) } else { server }
+    }
+
     fn upload_and_insert(self: &Rc<Self>, filename: String, mime: String, bytes: Vec<u8>) {
+        // Belt for the paths that reach here without the pre-read metadata
+        // check (clipboard pastes hand us bytes directly).
+        let cap = self.upload_cap();
+        if bytes.len() as u64 > cap {
+            self.status_label.set_text(&format!(
+                "{filename} is {} — the limit is {}",
+                human_bytes(bytes.len() as u64),
+                human_bytes(cap)
+            ));
+            return;
+        }
         self.status_label
             .set_text(&format!("uploading {filename} ({} KB)…", bytes.len() / 1024));
         let this = self.clone();
@@ -3985,6 +4027,11 @@ impl ChatWindow {
     /// Handle a paste that contains files or an image rather than text.
     /// Returns false when the clipboard holds neither (normal paste proceeds).
     fn paste_media(self: &Rc<Self>) -> bool {
+        // `uploads.paste.enabled`: pasting media uploads it. Off means a
+        // paste is just a paste, everywhere — same switch as the website.
+        if !self.app.setting("uploads.paste.enabled").as_bool().unwrap_or(true) {
+            return false;
+        }
         let clipboard = self.entry.clipboard();
         let formats = clipboard.formats();
 

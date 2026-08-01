@@ -79,7 +79,12 @@ fn build_css(app: &AppRef) -> String {
             font_rules.push_str(&format!("font-family: \"{family}\", monospace;\n"));
         }
     }
-    if let Some(px) = app.setting("look.font.size").as_f64() {
+    let size_key = if crate::is_mobile_class() {
+        "look.font.size.mobile"
+    } else {
+        "look.font.size"
+    };
+    if let Some(px) = app.setting(size_key).as_f64() {
         if (8.0..=32.0).contains(&px) {
             font_rules.push_str(&format!("font-size: {px}px;\n"));
         }
