@@ -1,0 +1,51 @@
+# Arch package for Scully.
+#
+# Usable on its own — `makepkg -si` from this directory builds and installs the
+# tagged release. The release workflow uses this same file rather than a
+# CI-only variant, so what ships is what you get building it yourself.
+#
+# Voice is built in, matching the .deb and .rpm: a call button you cannot press
+# is not a feature. That pulls a prebuilt libwebrtc at build time and needs
+# clang for the bindings, and alsa-lib at runtime for the microphone.
+
+pkgname=scully
+pkgver=0.1.18
+pkgrel=1
+pkgdesc="Native GTK4 client for a Lurker IRC bouncer"
+arch=('x86_64' 'aarch64')
+url="https://github.com/JawshTheDark/scully"
+license=('MPL-2.0')
+depends=('gtk4' 'alsa-lib')
+makedepends=('rust' 'clang' 'pkgconf')
+# Arch enables LTO in makepkg by default. That compiles ring's C objects with
+# -flto while the Rust link does not use the LTO plugin, and every C symbol ring
+# exports then comes back undefined at link time — webrtc-sys is the first
+# thing to fall over. Verified: with lto on, the build dies on
+# `ring_core_0_17_14__CRYPTO_memcmp`; with it off, it completes.
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# GitHub's generated tag tarballs carry no published checksum to pin against,
+# and the tag is the thing being trusted here.
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  # --locked so the package is built from the committed dependency graph, which
+  # is what the tests ran against — livekit's tree in particular is pinned for
+  # documented reasons (see crates/scully/Cargo.toml).
+  cargo build --release --locked -p scully --features voice
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  install -Dm755 target/release/scully \
+    "$pkgdir/usr/bin/scully"
+  # The desktop file's name must match the app id, or the Wayland compositor
+  # cannot find the icon for the window.
+  install -Dm644 packaging/io.jawsh.Scully.desktop \
+    "$pkgdir/usr/share/applications/io.jawsh.Scully.desktop"
+  install -Dm644 packaging/io.jawsh.Scully.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.jawsh.Scully.svg"
+  install -Dm644 README.md \
+    "$pkgdir/usr/share/doc/scully/README.md"
+}

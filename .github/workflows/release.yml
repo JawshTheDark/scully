@@ -141,6 +141,52 @@ jobs:
             *.deb
             *.rpm
 
+  # ── Arch: a .pkg.tar.zst ──────────────────────────────────────────────────
+  #
+  # Arch is neither .deb nor .rpm, so without this the one distro family the
+  # maintainer actually runs had no package — and with no package nothing
+  # installs the .desktop file, which is what a Wayland compositor matches the
+  # window's app_id against to find the icon.
+  #
+  # x86_64 only: the archlinux image is x86_64, and Arch Linux ARM is a separate
+  # distribution rather than another architecture of this one.
+  arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      # Before checkout: the action needs a working container, and pacman
+      # brings the toolchain makepkg will expect to find already installed.
+      - name: Install the toolchain
+        run: pacman -Syu --noconfirm rust gtk4 alsa-lib clang pkgconf git
+
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: v
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the package
+        run: |
+          set -eu
+          V="${{ steps.v.outputs.version }}"
+          cp packaging/PKGBUILD .
+          # The committed pkgver tracks the last release; the tag being built is
+          # authoritative, and it is also what names the source tarball.
+          sed -i "s/^pkgver=.*/pkgver=${V}/" PKGBUILD
+          # makepkg refuses to run as root, on purpose — a PKGBUILD is arbitrary
+          # code and building it as root is how a typo removes /usr.
+          useradd -m builder
+          chown -R builder .
+          sudo -u builder makepkg -f --noconfirm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: '*.pkg.tar.zst'
+
   # ── macOS: a real .app inside a .dmg ──────────────────────────────────────
   macos:
     runs-on: macos-latest
@@ -289,7 +335,7 @@ jobs:
           path: '*-setup.exe'
 
   release:
-    needs: [linux, macos, windows]
+    needs: [linux, arch, macos, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
