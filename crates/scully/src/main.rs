@@ -26,6 +26,7 @@ mod networkdialog;
 mod nickmenu;
 mod paths;
 mod settings;
+mod split;
 mod theme;
 #[cfg(feature = "voice")]
 mod voice;

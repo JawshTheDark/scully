@@ -185,6 +185,12 @@ pub struct ChatWindow {
     /// The previous appended row, for the collapse rules. Cleared whenever
     /// the buffer is redrawn from scratch.
     prev_row: RefCell<Option<PrevRow>>,
+    /// Counts appended rows for the alternate-row striping.
+    row_parity: Cell<u64>,
+    /// Armed after the first Send press on a message that will split
+    /// (`chat.allow_split_messages` off): the second press confirms. Cleared
+    /// by any edit or buffer switch.
+    pending_split_confirm: Cell<bool>,
     /// Whether the view should follow new content to the bottom. Set by real
     /// user scrolls only; a programmatic scroll must not flip it (hence
     /// [`ChatWindow::programmatic`]). This replaces snapshotting "am I at the
@@ -530,6 +536,8 @@ impl ChatWindow {
             bar_time_fmt: RefCell::new(String::new()),
             mirc_palette: RefCell::new(Vec::new()),
             prev_row: RefCell::new(None),
+            row_parity: Cell::new(0),
+            pending_split_confirm: Cell::new(false),
             time_fmt: RefCell::new("%H:%M:%S".to_string()),
             paging: Cell::new(false),
             stick_bottom: Cell::new(true),
@@ -820,7 +828,34 @@ impl ChatWindow {
         clicks.connect_released(move |gesture, n_press, x, y| {
             if n_press == 1 {
                 if let Some(url) = this.link_at(x, y) {
-                    this.open_url(&url);
+                    // `chat.image_modal.enabled` (default on): clicking an
+                    // image link opens the in-app viewer when we already hold
+                    // the texture (the inline embed fetched it). Ctrl-click,
+                    // like the web's Cmd/Ctrl-click, always goes to the
+                    // browser; so does everything that isn't a loaded image.
+                    let modal = this
+                        .app
+                        .setting("chat.image_modal.enabled")
+                        .as_bool()
+                        .unwrap_or(true);
+                    let ctrl = gesture
+                        .current_event_state()
+                        .contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                    let viewed = modal
+                        && !ctrl
+                        && matches!(
+                            crate::media::classify(&url),
+                            Some(crate::media::MediaKind::Image)
+                        )
+                        && this
+                            .app
+                            .images
+                            .get(&url)
+                            .inspect(|tex| this.view_image(tex, &url))
+                            .is_some();
+                    if !viewed {
+                        this.open_url(&url);
+                    }
                     gesture.set_state(gtk::EventSequenceState::Claimed);
                 }
             } else if n_press == 2 && this.link_at(x, y).is_none() {
@@ -1020,6 +1055,9 @@ impl ChatWindow {
         // Typing signals ride composition, not submission.
         let this = self.clone();
         self.entry.connect_changed(move |entry| {
+            // Any edit invalidates a pending split confirmation — the message
+            // being confirmed is no longer the message in the box.
+            this.pending_split_confirm.set(false);
             if !entry.text().is_empty() {
                 this.signal_typing("active");
             }
@@ -1337,6 +1375,7 @@ impl ChatWindow {
                     {
                         let n = gio::Notification::new(&format!("{name} is online"));
                         self.app.gtk_app.send_notification(None, &n);
+                        self.app.play_notify_sound("friend_online");
                     }
                 }
                 StoreEvent::BufferListChanged => {
@@ -1597,6 +1636,11 @@ impl ChatWindow {
     /// layout: sidebar visibility, timestamp format, nick palette.
     fn apply_display_settings(&self) {
         self.retint_nick_tags();
+        // Striping colours may have changed; drop the cached tag so the next
+        // redraw rebuilds it from the new values.
+        if let Some(tag) = self.text.tag_table().lookup("row-alt") {
+            self.text.tag_table().remove(&tag);
+        }
         // The nicklist derives its colours from the same palette, but its
         // labels are plain widgets, not retintable tags — rebuild them.
         self.rebuild_member_list();
@@ -1699,17 +1743,28 @@ impl ChatWindow {
         // freshness check (§5.3, §9.6). What remains is per-CATEGORY user
         // preference: the raw signals stay on the wire beside `notify`
         // precisely so the client can pick the alert kind per signal type.
-        let enabled = if event.matched {
-            self.app.setting("notifications.highlight.enabled").as_bool().unwrap_or(true)
+        let category = if event.matched {
+            "highlight"
         } else if event.dm {
-            self.app.setting("notifications.dm.enabled").as_bool().unwrap_or(true)
+            "dm"
         } else if event.notify_always {
-            self.app.setting("notifications.always_notify.enabled").as_bool().unwrap_or(true)
+            "always_notify"
         } else {
-            true
+            ""
         };
+        let enabled = category.is_empty()
+            || self
+                .app
+                .setting(&format!("notifications.{category}.enabled"))
+                .as_bool()
+                .unwrap_or(true);
         if !enabled {
             return;
+        }
+        // The category's sound rides the same gate as its banner
+        // (notifications.<cat>.sound.*), played from the server's own files.
+        if !category.is_empty() {
+            self.app.play_notify_sound(category);
         }
         let store = self.app.store.borrow();
         let title = store
@@ -2366,6 +2421,7 @@ impl ChatWindow {
         self.save_draft();
 
         *self.active.borrow_mut() = Some(key.clone());
+        self.pending_split_confirm.set(false);
         self.update_member_pane();
         self.paging.set(false);
         self.history_pos.set(None);
@@ -2425,6 +2481,7 @@ impl ChatWindow {
         let Some(key) = self.active.borrow().clone() else {
             self.clear_embeds();
             *self.prev_row.borrow_mut() = None;
+            self.row_parity.set(0);
             self.text.set_text("");
             return;
         };
@@ -2432,6 +2489,7 @@ impl ChatWindow {
         let Some(buf) = store.buffer(&key) else {
             self.clear_embeds();
             *self.prev_row.borrow_mut() = None;
+            self.row_parity.set(0);
             self.text.set_text("");
             return;
         };
@@ -2450,21 +2508,75 @@ impl ChatWindow {
             .filter_map(|e| e.nick.as_ref().map(|n| n.to_ascii_lowercase()))
             .collect();
 
+        // When each nick last spoke, unix seconds — the smart tier's clock.
+        // Derived from the ring rather than the server's speakers list; the
+        // ring covers far more than any sane smart_filter_delay window.
+        let last_spoke: std::collections::HashMap<String, i64> = {
+            let mut m = std::collections::HashMap::new();
+            for e in buf.events.iter().filter(|e| !e.is_self && e.event_type.is_chat()) {
+                if let (Some(n), Some(t)) = (e.nick.as_ref(), event_unix(e)) {
+                    let entry = m.entry(n.to_ascii_lowercase()).or_insert(t);
+                    *entry = (*entry).max(t);
+                }
+            }
+            m
+        };
+        let own_nick = key
+            .network_id
+            .and_then(|id| store.networks.get(&id))
+            .and_then(|n| n.nick.as_ref().map(|n| n.to_ascii_lowercase()));
+
         // The event-noise tier, resolved client-side (`shared/eventFilter.ts`):
-        // `none` hides the noise set entirely; `smart` keeps events only for
-        // nicks who have recently spoken. Both are display choices, which is
-        // why they live here and not in the store.
+        // `none` hides the noise set entirely; `smart` keeps presence events
+        // only around nicks who recently spoke, tuned by the
+        // `chat.smart_filter_*` settings with the web's exact semantics
+        // (MessageList.vue): joins/parts+quits+chghost/nicks each toggleable,
+        // "recently" is the delay window BEFORE the event, and a join is
+        // revealed retroactively if the joiner speaks within the unmask
+        // window AFTER it. Your own events never filter.
         let tier = self.app.event_mode.get();
+        let f_join = self.app.setting("chat.smart_filter_join").as_bool().unwrap_or(true);
+        let f_quit = self.app.setting("chat.smart_filter_quit").as_bool().unwrap_or(true);
+        let f_nick = self.app.setting("chat.smart_filter_nick").as_bool().unwrap_or(true);
+        let delay_secs =
+            self.app.setting("chat.smart_filter_delay").as_i64().unwrap_or(5).max(0) * 60;
+        let unmask_secs =
+            self.app.setting("chat.smart_filter_join_unmask").as_i64().unwrap_or(30).max(0) * 60;
         let events: Vec<_> = buf
             .events
             .iter()
             .filter(|e| match tier {
                 lurker_proto::EventMode::None => !e.event_type.is_noise(),
                 lurker_proto::EventMode::Smart => {
-                    !e.event_type.is_consolidatable()
-                        || e.nick
-                            .as_ref()
-                            .is_some_and(|n| recent.contains(&n.to_ascii_lowercase()))
+                    use lurker_proto::EventType as T;
+                    let filterable = match e.event_type {
+                        T::Join => f_join,
+                        T::Part | T::Quit | T::Chghost => f_quit,
+                        T::Nick => f_nick,
+                        _ => false,
+                    };
+                    if !filterable {
+                        return true;
+                    }
+                    let nick_lc = e.nick.as_ref().map(|n| n.to_ascii_lowercase());
+                    if nick_lc.is_none() || nick_lc == own_nick {
+                        return true;
+                    }
+                    let spoke = nick_lc.as_ref().and_then(|n| last_spoke.get(n)).copied();
+                    let when = event_unix(e);
+                    match (spoke, when) {
+                        (Some(s), Some(t)) => {
+                            let recently = s <= t && t - s <= delay_secs;
+                            let unmasked = e.event_type == T::Join
+                                && unmask_secs > 0
+                                && s > t
+                                && s - t <= unmask_secs;
+                            recently || unmasked
+                        }
+                        // No timestamp to reason with — the old membership
+                        // heuristic is better than hiding blind.
+                        _ => nick_lc.as_ref().is_some_and(|n| recent.contains(n)),
+                    }
                 }
                 lurker_proto::EventMode::All => true,
             })
@@ -2517,6 +2629,7 @@ impl ChatWindow {
         } else {
             self.clear_embeds();
             *self.prev_row.borrow_mut() = None;
+            self.row_parity.set(0);
             self.text.set_text("");
             0
         };
@@ -2820,6 +2933,22 @@ impl ChatWindow {
         *self.prev_row.borrow_mut() =
             Some(PrevRow { author: line.author.clone(), unix: line.unix, stamp });
 
+        // `look.color.message.alt_bg` / `alt_fg`: every other row striped, as
+        // the website does. The tag sits at priority 0, beneath every other
+        // tag, so nick colours and inline formatting still win; only hex
+        // values engage (the web default is a CSS var GTK cannot resolve,
+        // which means "off").
+        let n = self.row_parity.get();
+        self.row_parity.set(n.wrapping_add(1));
+        if n % 2 == 1 {
+            if let Some(tag) = self.alt_row_tag() {
+                let end = self.text.end_iter();
+                let mut start = end;
+                start.set_line_offset(0);
+                self.text.apply_tag(&tag, &start, &end);
+            }
+        }
+
         // The message body carries IRC formatting codes inline. Parsing splits
         // it into styled runs and drops the control characters, which is what
         // stops a colour chart rendering as a row of `▯` boxes.
@@ -2847,6 +2976,32 @@ impl ChatWindow {
             }
         }
 
+    }
+
+    /// The striping tag for alternate rows, or `None` when striping is off.
+    /// Cached in the tag table; `apply_display_settings` drops it so a
+    /// palette edit takes effect on the next redraw.
+    fn alt_row_tag(&self) -> Option<gtk::TextTag> {
+        let bg = self.app.setting("look.color.message.alt_bg");
+        let bg = bg.as_str().filter(|c| c.starts_with('#'))?;
+        // Same colour as the base background means striping is disabled —
+        // the registry's documented off switch.
+        if Some(bg) == self.app.setting("look.color.bg").as_str() {
+            return None;
+        }
+        let table = self.text.tag_table();
+        if let Some(tag) = table.lookup("row-alt") {
+            return Some(tag);
+        }
+        let builder = gtk::TextTag::builder().name("row-alt").paragraph_background(bg);
+        let fg_setting = self.app.setting("look.color.message.alt_fg");
+        let tag = match fg_setting.as_str().filter(|c| c.starts_with('#')) {
+            Some(fg) => builder.foreground(fg).build(),
+            None => builder.build(),
+        };
+        table.add(&tag);
+        tag.set_priority(0);
+        Some(tag)
     }
 
     /// Write the leading timestamp column for a row.
@@ -4433,6 +4588,42 @@ impl ChatWindow {
             return false;
         }
 
+        // The split gate (`chat.allow_split_messages`), mirroring the web:
+        // the server splits long PRIVMSGs into consecutive wire lines itself,
+        // so what's gated here is *surprise* — a /me over one line is a hard
+        // block (CTCP ACTION cannot split), and a plain message that will
+        // split needs either the setting on or a second Send press.
+        let (split_body, is_action) = match raw.strip_prefix('/') {
+            Some(rest) if !rest.starts_with('/') => match rest.split_once(' ') {
+                Some((c, a)) if c.eq_ignore_ascii_case("me") => (Some(a.to_string()), true),
+                _ => (None, false), // other commands don't ride PRIVMSG
+            },
+            _ => (Some(raw.strip_prefix('/').unwrap_or(raw).to_string()), false),
+        };
+        if let Some(body) = &split_body {
+            let budget =
+                if is_action { crate::split::ACTION_MAX_BYTES } else { crate::split::MESSAGE_MAX_BYTES };
+            let chunks = crate::split::chunk_count(body, budget);
+            if chunks > 1 {
+                if is_action {
+                    self.status_label.set_text(
+                        "action too long for one IRC line — actions can't split; shorten it",
+                    );
+                    return false;
+                }
+                let allow =
+                    self.app.setting("chat.allow_split_messages").as_bool().unwrap_or(false);
+                if !allow && !self.pending_split_confirm.get() {
+                    self.pending_split_confirm.set(true);
+                    self.status_label.set_text(&format!(
+                        "will split into {chunks} IRC lines — press Enter again to send"
+                    ));
+                    return false;
+                }
+            }
+        }
+        self.pending_split_confirm.set(false);
+
         if let Some(rest) = raw.strip_prefix('/') {
             if !rest.starts_with('/') {
                 return self.run_command(&key, rest);
@@ -4750,6 +4941,14 @@ fn mime_for(name: &str) -> String {
 /// unparents it, so `first_child` advances; a non-row is stepped over with
 /// `next_sibling` rather than retried, which is what stops the infinite
 /// "Tried to remove non-child" loop that once wrote gigabytes of warnings.
+/// An event's moment as unix seconds, when parseable.
+fn event_unix(e: &lurker_proto::MessageEvent) -> Option<i64> {
+    e.time
+        .as_deref()
+        .and_then(|raw| glib::DateTime::from_iso8601(raw, None).ok())
+        .map(|d| d.to_unix())
+}
+
 fn clear_list(list: &gtk::ListBox) {
     let mut child = list.first_child();
     while let Some(widget) = child {

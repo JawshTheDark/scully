@@ -943,6 +943,73 @@ impl App {
 
     /// Fetch an image for inline display, then redraw the buffers waiting on
     /// it. Deduped and size-capped by the cache.
+    /// Play the bundled alert sound for a notification category
+    /// (`highlight` / `dm` / `friend_online` / `always_notify`), honouring the
+    /// website's per-category sound settings.
+    ///
+    /// The sound files are the web client's own — the Lurker server serves
+    /// them at `/sounds/<choice>.mp3` — so the two clients literally play the
+    /// same audio. Downloaded once into the data dir, then played from disk;
+    /// a fetch failure just means silence this time (the notification itself
+    /// already went up).
+    pub fn play_notify_sound(self: &AppRef, category: &str) {
+        let enabled = self
+            .setting(&format!("notifications.{category}.sound.enabled"))
+            .as_bool()
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        let choice = self
+            .setting(&format!("notifications.{category}.sound.choice"))
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| "ping".to_string());
+        // Server-supplied name, disk path: allow only the shapes the registry
+        // enumerates so a hostile value can't traverse.
+        if !choice.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return;
+        }
+        let volume = self
+            .setting(&format!("notifications.{category}.sound.volume"))
+            .as_f64()
+            .unwrap_or(60.0)
+            .clamp(0.0, 100.0)
+            / 100.0;
+
+        let path = crate::paths::data_dir().join("sounds").join(format!("{choice}.mp3"));
+        if path.exists() {
+            play_sound_file(&path, volume);
+            return;
+        }
+        let Some(rest) = self.rest.borrow().clone() else { return };
+        let Ok(url) = rest.base().join(&format!("sounds/{choice}.mp3")) else { return };
+        self.spawn_async(
+            async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(20))
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("HTTP {}", resp.status()));
+                }
+                resp.bytes().await.map_err(|e| e.to_string())
+            },
+            move |result| match result {
+                Ok(bytes) => {
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    if std::fs::write(&path, &bytes).is_ok() {
+                        play_sound_file(&path, volume);
+                    }
+                }
+                Err(e) => tracing::debug!(error = %e, "alert sound fetch failed"),
+            },
+        );
+    }
+
     pub fn fetch_image(self: &AppRef, url: String, wake: BufferKey) {
         if !self.images.begin(&url) {
             return;
@@ -1119,4 +1186,23 @@ fn human_bytes(n: u64) -> String {
     } else {
         format!("{} KB", n / 1024)
     }
+}
+
+/// Play an audio file once at the given volume (0.0–1.0). The MediaFile is
+/// leaked into a static registry until it finishes — dropping it immediately
+/// would cut the sound off.
+fn play_sound_file(path: &std::path::Path, volume: f64) {
+    let media = gtk::MediaFile::for_filename(path);
+    media.set_volume(volume);
+    media.play();
+    // Keep it alive while playing; reap finished ones on each new play.
+    thread_local! {
+        static PLAYING: std::cell::RefCell<Vec<gtk::MediaFile>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    PLAYING.with(|p| {
+        let mut v = p.borrow_mut();
+        v.retain(|m| !m.is_ended());
+        v.push(media);
+    });
 }
