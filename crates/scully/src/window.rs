@@ -147,10 +147,6 @@ pub struct ChatWindow {
     completion: RefCell<Option<(i32, Vec<String>, usize)>>,
     /// Last outbound typing signal, to throttle the TAGMSGs.
     typing_sent: Cell<Option<std::time::Instant>>,
-    /// The speaker of the row most recently appended, so a run of messages
-    /// from one person prints the nick once. Cleared on any full redraw and by
-    /// any non-speech row.
-    last_author: RefCell<Option<String>>,
     /// Cached nick palette length, so renders don't re-read settings per line.
     palette_len: Cell<usize>,
     /// Cached strftime timestamp format.
@@ -485,7 +481,6 @@ impl ChatWindow {
             history_stash: RefCell::new(String::new()),
             completion: RefCell::new(None),
             typing_sent: Cell::new(None),
-            last_author: RefCell::new(None),
             palette_len: Cell::new(format::DEFAULT_NICK_PALETTE.len()),
             time_fmt: RefCell::new("%H:%M:%S".to_string()),
             paging: Cell::new(false),
@@ -2226,14 +2221,12 @@ impl ChatWindow {
     fn render_active(&self) {
         let Some(key) = self.active.borrow().clone() else {
             self.clear_embeds();
-            *self.last_author.borrow_mut() = None;
             self.text.set_text("");
             return;
         };
         let store = self.app.store.borrow();
         let Some(buf) = store.buffer(&key) else {
             self.clear_embeds();
-            *self.last_author.borrow_mut() = None;
             self.text.set_text("");
             return;
         };
@@ -2318,7 +2311,6 @@ impl ChatWindow {
             prev.len
         } else {
             self.clear_embeds();
-            *self.last_author.borrow_mut() = None;
             self.text.set_text("");
             0
         };
@@ -2532,40 +2524,24 @@ impl ChatWindow {
         let row_start = self.text.end_iter().offset();
         let _ = row_start;
 
-        // Messages group under a nick heading, the way Lurker's own client
-        // shows them: the speaker once, then what they said indented beneath,
-        // so a run of lines from one person reads as one turn in the
-        // conversation rather than as N rows each restating who is talking.
+        // Classic IRC rows: `time nick: message`, every line, no grouping.
+        // The grouped layout (nick once as a heading, messages indented under
+        // it) kept mis-attributing lines — the third line of a run reads as
+        // anonymous unless you've already learned the nick colours — and the
+        // user asked for the traditional form outright. Repeating the nick
+        // costs a little width and buys unambiguous authorship on every row.
+        self.insert_time(line);
         match &line.author {
             Some(author) => {
-                // A highlight always reprints its author, even mid-run.
-                // Reported: a mention landing on someone's third line reads as
-                // though YOU said it, because the only thing identifying the
-                // speaker is a nick colour several lines up. The line that
-                // names you is exactly the one where authorship matters most,
-                // so it never joins a group.
-                let breaks_group = line.kind == format::LineKind::Highlight;
-                let same_speaker = !breaks_group
-                    && self.last_author.borrow().as_deref() == Some(author.as_str());
-                if !same_speaker {
-                    // The heading is a row like any other, so it carries the
-                    // time too — leaving it blank punched a hole in the
-                    // timestamp column every time somebody started talking.
-                    self.insert_time(line);
-                    self.insert_with_tags(
-                        author,
-                        &[line.nick_tag.as_deref().unwrap_or("nick-plain"), "author"],
-                    );
-                    self.text.insert(&mut self.text.end_iter(), "\n");
-                }
-                *self.last_author.borrow_mut() = Some(author.clone());
-                self.insert_time(line);
+                self.insert_with_tags(
+                    author,
+                    &[line.nick_tag.as_deref().unwrap_or("nick-plain"), "author"],
+                );
+                self.insert_with_tags(": ", &["time"]);
             }
             None => {
-                // Presence, modes, server text: standalone rows keep their
-                // marker column and break any run of speech above them.
-                *self.last_author.borrow_mut() = None;
-                self.insert_time(line);
+                // Presence, modes, server text: the marker column (-->, <--,
+                // --) stands where the nick would.
                 self.insert_with_tags(line.nick.trim_start(), &[line
                     .nick_tag
                     .as_deref()
