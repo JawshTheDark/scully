@@ -17,6 +17,19 @@ use lurker_proto::consolidate::{self, Row};
 use lurker_proto::{mirc, BufferKey, ClientVerb};
 
 use crate::app::AppRef;
+
+/// Ceiling used when the server has not told us its upload limit yet. Only a
+/// guard against reading something enormous into memory; the server decides the
+/// real limit.
+const MAX_UPLOAD_FALLBACK: u64 = 64 * 1024 * 1024;
+
+fn human_bytes(n: u64) -> String {
+    if n >= 1024 * 1024 {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KB", n / 1024)
+    }
+}
 use crate::format::{self, TEXT_COLUMN};
 
 /// Scroll within this many pixels of the top to trigger loading an older page.
@@ -303,6 +316,10 @@ impl ChatWindow {
         let entry = gtk::Entry::builder()
             .placeholder_text("Message, or /help")
             .css_classes(["composer"])
+            // Required since the composer became a horizontal row: a vertical
+            // box stretches its children across, a horizontal one does not, so
+            // without this the entry collapses to its natural width.
+            .hexpand(true)
             .build();
 
         let centre = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1485,8 +1502,11 @@ impl ChatWindow {
                 self.buffer_pane.set_visible(show);
             }
         }
+        // A DM has two people in it and you are one of them; a member list
+        // there is a column of nothing. Channels only.
+        let is_channel = self.active.borrow().as_ref().is_some_and(|k| k.is_channel());
         if let Some(show) = self.app.setting("look.layout.show_member_list").as_bool() {
-            self.member_pane.set_visible(show);
+            self.member_pane.set_visible(show && is_channel);
         }
     }
 
@@ -2353,7 +2373,15 @@ impl ChatWindow {
         // conversation rather than as N rows each restating who is talking.
         match &line.author {
             Some(author) => {
-                let same_speaker = self.last_author.borrow().as_deref() == Some(author.as_str());
+                // A highlight always reprints its author, even mid-run.
+                // Reported: a mention landing on someone's third line reads as
+                // though YOU said it, because the only thing identifying the
+                // speaker is a nick colour several lines up. The line that
+                // names you is exactly the one where authorship matters most,
+                // so it never joins a group.
+                let breaks_group = line.kind == format::LineKind::Highlight;
+                let same_speaker = !breaks_group
+                    && self.last_author.borrow().as_deref() == Some(author.as_str());
                 if !same_speaker {
                     self.insert_with_tags(
                         author,
@@ -3399,12 +3427,36 @@ impl ChatWindow {
                 .basename()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "upload".to_string());
-            // Read on the GTK thread: the picker has already made the user
-            // wait, and the upload itself is what takes the time.
-            let bytes = match file.path().and_then(|p| std::fs::read(p).ok()) {
-                Some(b) => b,
+            // Check the size BEFORE reading. The whole file goes into memory
+            // to be uploaded, so picking a large video on a phone can exhaust
+            // it and get the process killed — which reads to the user as the
+            // app crashing on upload, with nothing to explain it.
+            let path = match file.path() {
+                Some(p) => p,
                 None => {
                     this.status_label.set_text("could not read that file");
+                    return;
+                }
+            };
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let cap = this
+                .app
+                .store
+                .borrow()
+                .max_upload_bytes
+                .unwrap_or(MAX_UPLOAD_FALLBACK);
+            if size > cap {
+                this.status_label.set_text(&format!(
+                    "{name} is {} — this server accepts up to {}",
+                    human_bytes(size),
+                    human_bytes(cap)
+                ));
+                return;
+            }
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    this.status_label.set_text(&format!("could not read that file: {e}"));
                     return;
                 }
             };
