@@ -86,7 +86,6 @@ window {
   min-height: 30px;
   padding: 0 4px;
   border: none;
-  font-size: 13pt;
 }
 
 /* The row that holds caret + dot + name. The vertical padding lives HERE, not
@@ -357,7 +356,8 @@ button.toolbtn {
   min-width: 30px;
   min-height: 28px;
   padding: 0 6px;
-  font-size: 12.5pt;
+  /* Symbolic icons size through the icon machinery, not the font. */
+  -gtk-icon-size: 17px;
 }
 
 button.toolbtn:hover {
@@ -569,5 +569,4 @@ button.toolbtn.attach {
   min-width: 34px;
   min-height: 34px;
   border: none;
-  font-size: 12pt;
 }

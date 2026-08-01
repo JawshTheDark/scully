@@ -295,33 +295,36 @@ impl ChatWindow {
         header.append(&topic_label);
 
         // ── Toolbar buttons (right-aligned) ──
-        let tool = |glyph: &str, tip: &str| {
+        //
+        // Symbolic theme icons, not typeface glyphs. Text glyphs came from
+        // whichever font happened to carry each codepoint — mismatched
+        // weights, mismatched sizes, and one emoji font drawing a giant
+        // telephone. The symbolic set is drawn as a family, monochrome,
+        // recoloured by the button's own CSS `color`.
+        let tool = |icon: &str, tip: &str| {
             gtk::Button::builder()
-                .label(glyph)
+                .icon_name(icon)
                 .tooltip_text(tip)
                 .css_classes(["toolbtn"])
                 .valign(gtk::Align::Center)
                 .build()
         };
         // Only ever visible in the narrow (phone) layout.
-        let btn_back = tool("\u{2039}", "Back to conversations");
+        let btn_back = tool("go-previous-symbolic", "Back to conversations");
         btn_back.set_visible(false);
         header.prepend(&btn_back);
         // Phone-only: there is no room for the nicklist beside the messages,
         // so it becomes a view you can raise instead of a pane you lose.
-        let btn_members = tool("\u{263A}\u{FE0E}", "Show who is in this channel");
+        let btn_members = tool("system-users-symbolic", "Show who is in this channel");
         btn_members.set_visible(false);
         header.append(&btn_members);
-        let btn_addnet = tool("+", "Add a network");
-        let btn_search = tool("⌕", "Search messages (Ctrl+F)");
-        let btn_popout = tool("⬈", "Pop this channel out into its own window");
-        let btn_read = tool("✓", "Mark everything read");
-        let btn_settings = tool("⚙", "Settings");
+        let btn_addnet = tool("list-add-symbolic", "Add a network");
+        let btn_search = tool("system-search-symbolic", "Search messages (Ctrl+F)");
+        let btn_popout = tool("window-new-symbolic", "Pop this channel out into its own window");
+        let btn_read = tool("object-select-symbolic", "Mark everything read");
+        let btn_settings = tool("emblem-system-symbolic", "Settings");
         // Hidden until `voiceEnabled` arrives — see refresh_voice_ui.
-        // \u{FE0E} forces TEXT presentation. Without it these codepoints
-        // resolve to the color-emoji font, which draws its own glyph at its
-        // own size — the toolbar's phone rendered huge next to plain glyphs.
-        let btn_call = tool("\u{260E}\u{FE0E}", "Start or join a voice call (/call)");
+        let btn_call = tool("call-start-symbolic", "Start or join a voice call (/call)");
         btn_call.set_visible(false);
         // The tools sit in the sidebar header (see above). A popout has no
         // sidebar, so it simply has no toolbar — which it already didn't.
@@ -370,7 +373,7 @@ impl ChatWindow {
         // already copied — but it is the obvious affordance on a desktop too,
         // so it is not gated on the narrow layout.
         let btn_attach = gtk::Button::builder()
-            .label("\u{1F4CE}\u{FE0E}")
+            .icon_name("mail-attachment-symbolic")
             .tooltip_text("Attach a file or image")
             .css_classes(["toolbtn", "attach"])
             .valign(gtk::Align::Center)
@@ -418,7 +421,7 @@ impl ChatWindow {
         let members_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         members_header.add_css_class("sidebar-header");
         let btn_members_back = gtk::Button::builder()
-            .label("\u{2039}")
+            .icon_name("go-previous-symbolic")
             .tooltip_text("Back to the conversation")
             .css_classes(["toolbtn"])
             .build();
