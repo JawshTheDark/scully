@@ -9,14 +9,14 @@
 # clang for the bindings, and alsa-lib at runtime for the microphone.
 
 pkgname=scully
-pkgver=0.1.23
+pkgver=0.1.24
 pkgrel=1
 pkgdesc="Native GTK4 client for a self-hosted Lurker IRC server"
 arch=('x86_64' 'aarch64')
 url="https://github.com/JawshTheDark/scully"
 license=('MPL-2.0')
 depends=('gtk4' 'alsa-lib')
-makedepends=('rust' 'clang' 'pkgconf')
+makedepends=('rust' 'clang' 'pkgconf' 'librsvg')
 # Arch enables LTO in makepkg by default. That compiles ring's C objects with
 # -flto while the Rust link does not use the LTO plugin, and every C symbol ring
 # exports then comes back undefined at link time — webrtc-sys is the first
@@ -48,6 +48,14 @@ package() {
     "$pkgdir/usr/share/applications/io.jawsh.Scully.desktop"
   install -Dm644 packaging/io.jawsh.Scully.svg \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.jawsh.Scully.svg"
+  # Sized PNGs: KDE's task manager resolves app icons from the sized dirs and
+  # skips scalable-only entries, leaving the window on a generic icon.
+  for size in 32 48 64 128 256 512; do
+    rsvg-convert -w "$size" -h "$size" packaging/io.jawsh.Scully.svg \
+      -o icon-$size.png
+    install -Dm644 icon-$size.png \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/io.jawsh.Scully.png"
+  done
   install -Dm644 README.md \
     "$pkgdir/usr/share/doc/scully/README.md"
 }

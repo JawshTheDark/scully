@@ -56,7 +56,7 @@ jobs:
       - name: Build
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev rpm libasound2-dev clang
+          sudo apt-get install -y libgtk-4-dev rpm libasound2-dev clang librsvg2-bin
           cargo build --release -p scully --features voice
 
       - name: Resolve version
@@ -77,6 +77,14 @@ jobs:
           install -m644 packaging/io.jawsh.Scully.desktop  pkg/usr/share/applications/io.jawsh.Scully.desktop
           install -m644 packaging/io.jawsh.Scully.svg      pkg/usr/share/icons/hicolor/scalable/apps/io.jawsh.Scully.svg
           install -m644 README.md                          pkg/usr/share/doc/scully/README.md
+          # Sized PNGs beside the SVG: KDE's task manager (and some other
+          # shells) resolve app icons from the sized dirs and skip
+          # scalable-only themes, which left the window on a generic icon.
+          for size in 32 48 64 128 256 512; do
+            mkdir -p "pkg/usr/share/icons/hicolor/${size}x${size}/apps"
+            rsvg-convert -w "$size" -h "$size" packaging/io.jawsh.Scully.svg \
+              -o "pkg/usr/share/icons/hicolor/${size}x${size}/apps/io.jawsh.Scully.png"
+          done
 
       - name: Build .deb
         run: |
@@ -124,6 +132,7 @@ jobs:
           /usr/bin/scully
           /usr/share/applications/io.jawsh.Scully.desktop
           /usr/share/icons/hicolor/scalable/apps/io.jawsh.Scully.svg
+          /usr/share/icons/hicolor/*/apps/io.jawsh.Scully.png
           /usr/share/doc/scully/README.md
           EOF
           mkdir -p rpmbuild/SOURCES/tree
@@ -158,7 +167,7 @@ jobs:
       # Before checkout: the action needs a working container, and pacman
       # brings the toolchain makepkg will expect to find already installed.
       - name: Install the toolchain
-        run: pacman -Syu --noconfirm rust gtk4 alsa-lib clang pkgconf git
+        run: pacman -Syu --noconfirm rust gtk4 alsa-lib clang pkgconf git librsvg
 
       - uses: actions/checkout@v4
 
