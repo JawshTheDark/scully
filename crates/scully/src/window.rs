@@ -2979,6 +2979,29 @@ impl ChatWindow {
             widget.add_css_class("embed");
             container_ref.remove(btn);
             container_ref.append(&widget);
+
+            // A backend-less GTK (the Windows bundle ships no gstreamer)
+            // errors the stream instead of playing. Say so, in place of the
+            // dead blank widget the user would otherwise poke at — and
+            // detach the errored stream immediately, which is also what
+            // makes later teardown safe (#11).
+            let holder = container_ref.downgrade();
+            media.connect_error_notify(move |m| {
+                let Some(err) = m.error() else { return };
+                let Some(holder) = holder.upgrade() else { return };
+                tracing::warn!(error = %err, "media playback unavailable");
+                // Detach BEFORE removing: dropping a player that still holds
+                // the errored stream is the native crash this exists to stop.
+                defuse_media(&holder.clone().upcast());
+                clear_box(&holder);
+                holder.append(
+                    &gtk::Label::builder()
+                        .label(format!("⚠ can't play here: {err}"))
+                        .wrap(true)
+                        .css_classes(["embed-note"])
+                        .build(),
+                );
+            });
             media.play();
         });
         container.upcast()
@@ -2990,6 +3013,12 @@ impl ChatWindow {
     /// `gtk_text_view_remove` the coredump pinned).
     fn clear_embeds(&self) {
         for widget in self.embeds.borrow_mut().drain(..) {
+            // Detach any media stream FIRST (#11): tearing down a gtk::Video
+            // whose MediaFile is errored — a backend-less Windows install is
+            // the field case — crashes natively inside unrealize. A detached
+            // player tears down as an ordinary widget. Field-reproduced: play
+            // a video with no gstreamer, switch buffers, native crash.
+            defuse_media(&widget);
             // The widget's parent is the TextView; remove there.
             if widget.parent().is_some() {
                 self.text_view.remove(&widget);
@@ -5491,6 +5520,34 @@ fn event_unix(e: &lurker_proto::MessageEvent) -> Option<i64> {
         .as_deref()
         .and_then(|raw| glib::DateTime::from_iso8601(raw, None).ok())
         .map(|d| d.to_unix())
+}
+
+/// Pause and detach the media stream from any player inside `root`, so the
+/// widget tree tears down as plain widgets. See clear_embeds (#11).
+fn defuse_media(root: &gtk::Widget) {
+    if let Some(video) = root.downcast_ref::<gtk::Video>() {
+        if let Some(stream) = video.media_stream() {
+            if stream.is_playing() {
+                stream.pause();
+            }
+        }
+        video.set_media_stream(gtk::MediaStream::NONE);
+        return;
+    }
+    if let Some(controls) = root.downcast_ref::<gtk::MediaControls>() {
+        if let Some(stream) = controls.media_stream() {
+            if stream.is_playing() {
+                stream.pause();
+            }
+        }
+        controls.set_media_stream(gtk::MediaStream::NONE);
+        return;
+    }
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        defuse_media(&widget);
+        child = widget.next_sibling();
+    }
 }
 
 fn clear_box(container: &gtk::Box) {
