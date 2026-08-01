@@ -4737,6 +4737,26 @@ impl ChatWindow {
         Some((anchor, kind, candidates))
     }
 
+    /// Apply a colour pick from the palette: merge into any colour code
+    /// already at the cursor, replacing the merged span.
+    fn pick_color(&self, index: u8, background: bool) {
+        let text = self.entry.text().to_string();
+        let cursor = self.entry.position().max(0) as usize;
+        let before: String = text.chars().take(cursor).collect();
+        let (span, code) = crate::input::merge_color_code(&before, index, background);
+        if span > 0 {
+            let start = (cursor - span) as i32;
+            self.entry.delete_text(start, cursor as i32);
+            let mut pos = start;
+            self.entry.insert_text(&code, &mut pos);
+            self.entry.set_position(pos);
+        } else {
+            self.insert_format(&code);
+            return;
+        }
+        self.entry.grab_focus_without_selecting();
+    }
+
     /// Insert an IRC formatting code at the cursor (composer keyboard
     /// shortcuts and the palette popover both land here).
     fn insert_format(&self, code: &str) {
@@ -4789,7 +4809,7 @@ impl ChatWindow {
                 .or_else(|| mirc::color_hex(i).map(str::to_string))
                 .unwrap_or_else(|| "#888888".to_string());
             let swatch = gtk::Button::builder()
-                .tooltip_text(format!("Colour {i}"))
+                .tooltip_text(format!("Colour {i} — left: text, right: background"))
                 .css_classes(["mirc-swatch"])
                 .build();
             swatch.set_child(Some(
@@ -4798,8 +4818,18 @@ impl ChatWindow {
                     .label(format!("<span foreground=\"{colour}\">⬤</span>"))
                     .build(),
             ));
+            // Left picks the foreground, right the background; picking both
+            // merges into ONE \x03fg,bg code at the cursor (see
+            // input::merge_color_code) instead of stacking codes that fight.
             let this = self.clone();
-            swatch.connect_clicked(move |_| this.insert_format(&format!("\u{03}{i:02}")));
+            swatch.connect_clicked(move |_| this.pick_color(i, false));
+            let right = gtk::GestureClick::builder().button(3).build();
+            let this = self.clone();
+            right.connect_pressed(move |g, _, _, _| {
+                g.set_state(gtk::EventSequenceState::Claimed);
+                this.pick_color(i, true);
+            });
+            swatch.add_controller(right);
             grid.attach(&swatch, (i % 8) as i32, (i / 8) as i32, 1, 1);
         }
         root.append(&grid);

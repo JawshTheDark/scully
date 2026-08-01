@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/lurker-proto", "crates/lurker-client", "crates/scully"]
 
 [workspace.package]
-version = "0.1.29"
+version = "0.1.30"
 edition = "2021"
 rust-version = "1.85"
 license = "MPL-2.0"
