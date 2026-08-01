@@ -309,7 +309,7 @@ impl ChatWindow {
         header.prepend(&btn_back);
         // Phone-only: there is no room for the nicklist beside the messages,
         // so it becomes a view you can raise instead of a pane you lose.
-        let btn_members = tool("\u{1F464}", "Show who is in this channel");
+        let btn_members = tool("\u{263A}\u{FE0E}", "Show who is in this channel");
         btn_members.set_visible(false);
         header.append(&btn_members);
         let btn_addnet = tool("+", "Add a network");
@@ -318,7 +318,10 @@ impl ChatWindow {
         let btn_read = tool("✓", "Mark everything read");
         let btn_settings = tool("⚙", "Settings");
         // Hidden until `voiceEnabled` arrives — see refresh_voice_ui.
-        let btn_call = tool("\u{1F4DE}", "Start or join a voice call (/call)");
+        // \u{FE0E} forces TEXT presentation. Without it these codepoints
+        // resolve to the color-emoji font, which draws its own glyph at its
+        // own size — the toolbar's phone rendered huge next to plain glyphs.
+        let btn_call = tool("\u{260E}\u{FE0E}", "Start or join a voice call (/call)");
         btn_call.set_visible(false);
         // The tools sit in the sidebar header (see above). A popout has no
         // sidebar, so it simply has no toolbar — which it already didn't.
@@ -367,7 +370,7 @@ impl ChatWindow {
         // already copied — but it is the obvious affordance on a desktop too,
         // so it is not gated on the narrow layout.
         let btn_attach = gtk::Button::builder()
-            .label("\u{1F4CE}")
+            .label("\u{1F4CE}\u{FE0E}")
             .tooltip_text("Attach a file or image")
             .css_classes(["toolbtn", "attach"])
             .valign(gtk::Align::Center)
@@ -2234,7 +2237,7 @@ impl ChatWindow {
                 let call_n = store.call_count(&key);
                 if call_n > 0 {
                     let call_badge = gtk::Label::builder()
-                        .label(format!("\u{1F4DE} {call_n}"))
+                        .label(format!("\u{260E}\u{FE0E} {call_n}"))
                         .css_classes(["badge", "badge-call"])
                         .tooltip_text("Voice call in progress — press 📞 or /call to join")
                         .build();
@@ -3196,7 +3199,7 @@ impl ChatWindow {
 
         self.call_button.set_visible(true);
         if count > 0 {
-            self.call_status.set_text(&format!("\u{1F4DE} Call in progress — {count} in call"));
+            self.call_status.set_text(&format!("\u{260E}\u{FE0E} Call in progress — {count} in call"));
             self.call_button.set_label("Join call");
         } else {
             self.call_status.set_text("No voice call here yet");
