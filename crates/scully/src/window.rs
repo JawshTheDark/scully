@@ -448,7 +448,10 @@ impl ChatWindow {
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&left)
             .end_child(&inner)
-            .position(250)
+            // Wide enough for the brand plus six full-size toolbar buttons —
+            // the header's natural width governs, since shrink_start_child
+            // (false) below stops the pane going under its minimum anyway.
+            .position(290)
             .resize_start_child(false)
             // Without this the pane may be allocated LESS than the sidebar's
             // minimum width, and GTK then overflows the child instead of

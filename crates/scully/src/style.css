@@ -79,10 +79,14 @@ window {
 }
 
 .sidebar-header button.toolbtn {
-  min-width: 20px;
-  min-height: 20px;
-  padding: 0 3px;
+  /* Big enough to see and to hit. The first pass shrank these to 20px to
+     stop the sidebar clipping; that fixed the clip by making every control
+     nearly invisible. The pane is sized to hold them instead. */
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0 4px;
   border: none;
+  font-size: 13pt;
 }
 
 /* The row that holds caret + dot + name. The vertical padding lives HERE, not
@@ -350,9 +354,10 @@ button.toolbtn {
   color: @fg_muted;
   border: 1px solid @border;
   border-radius: 2px;
-  min-width: 26px;
-  min-height: 22px;
+  min-width: 30px;
+  min-height: 28px;
   padding: 0 6px;
+  font-size: 12.5pt;
 }
 
 button.toolbtn:hover {
