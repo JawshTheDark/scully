@@ -2,12 +2,12 @@
 Type=Application
 Name=Scully
 GenericName=IRC Client
-Comment=Native client for a Lurker IRC bouncer
+Comment=Native client for a self-hosted Lurker IRC server
 Exec=scully
 Icon=io.jawsh.Scully
 Terminal=false
 Categories=Network;InstantMessaging;IRC;
-Keywords=IRC;chat;lurker;bouncer;
+Keywords=IRC;chat;lurker;
 StartupNotify=true
 StartupWMClass=scully
 # Phosh and other mobile shells read this to decide whether an app belongs in a

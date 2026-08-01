@@ -93,9 +93,9 @@ jobs:
           Architecture: ${{ matrix.deb_arch }}
           Depends: libgtk-4-1 (>= 4.12), libasound2
           Maintainer: JawshTheDark <noreply@users.noreply.github.com>
-          Description: Native GTK4 client for a Lurker IRC bouncer
-           Scully is a native desktop client for the self-hosted Lurker IRC
-           bouncer. It adapts to phone-sized screens, so it is usable on FuriOS,
+          Description: Native GTK4 client for a self-hosted Lurker IRC server
+           Scully is a native desktop client for Lurker, the self-hosted
+           always-on IRC client. It adapts to phone-sized screens, so it is usable on FuriOS,
            Mobian and other GTK4 handsets as well as on the desktop.
           EOF
           dpkg-deb --build --root-owner-group pkg "scully_${V}_${{ matrix.deb_arch }}.deb"
@@ -109,14 +109,14 @@ jobs:
           Name:           scully
           Version:        ${V}
           Release:        1
-          Summary:        Native GTK4 client for a Lurker IRC bouncer
+          Summary:        Native GTK4 client for a self-hosted Lurker IRC server
           License:        MPL-2.0
           URL:            https://github.com/JawshTheDark/scully
           Requires:       gtk4 >= 4.12
           Requires:       alsa-lib
           %description
-          Scully is a native desktop client for the self-hosted Lurker IRC
-          bouncer, with a single-pane layout on phone-sized screens.
+          Scully is a native desktop client for Lurker, the self-hosted
+          always-on IRC client, with a single-pane layout on phone-sized screens.
           %install
           mkdir -p %{buildroot}
           cp -a %{_sourcedir}/tree/. %{buildroot}/

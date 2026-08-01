@@ -4142,7 +4142,83 @@ impl ChatWindow {
         if user_mb > 0 { server.min(user_mb.saturating_mul(1024 * 1024)) } else { server }
     }
 
+    /// Re-encode a static image per the `uploads.image.*` settings, exactly
+    /// as the website does before uploading: scale the longest edge down to
+    /// max_dimension and re-encode at the chosen quality. Returns the
+    /// replacement (filename, mime, bytes), or `None` to upload the original
+    /// (animated formats bypass verbatim; a failed decode falls through
+    /// rather than blocking the upload).
+    ///
+    /// One honest divergence: the web's default format is webp, but
+    /// gdk-pixbuf has no webp encoder on most systems. When webp is asked for
+    /// and unavailable, images that need work are saved as png — lossless and
+    /// alpha-preserving, which honours the *reason* the web default is webp
+    /// (transparency survives) at the cost of size.
+    fn recompress_image(
+        &self,
+        filename: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Option<(String, String, Vec<u8>)> {
+        if !mime.starts_with("image/") || mime == "image/gif" {
+            return None; // animated or not an image: verbatim, like the web
+        }
+        let format = self
+            .app
+            .setting("uploads.image.format")
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| "webp".to_string());
+        let max_dim = self.app.setting("uploads.image.max_dimension").as_i64().unwrap_or(2048);
+        let quality =
+            self.app.setting("uploads.image.quality").as_i64().unwrap_or(85).clamp(30, 100);
+
+        let loader = gtk::gdk_pixbuf::PixbufLoader::new();
+        loader.write(bytes).ok()?;
+        loader.close().ok()?;
+        let pixbuf = loader.pixbuf()?;
+
+        let (w, h) = (pixbuf.width(), pixbuf.height());
+        let longest = w.max(h) as i64;
+        let scaled = if max_dim > 0 && longest > max_dim {
+            let f = max_dim as f64 / longest as f64;
+            pixbuf.scale_simple(
+                ((w as f64 * f).round() as i32).max(1),
+                ((h as f64 * f).round() as i32).max(1),
+                gtk::gdk_pixbuf::InterpType::Bilinear,
+            )?
+        } else if format == "jpeg" && mime != "image/jpeg" {
+            pixbuf // format conversion still wanted at original size
+        } else if pixbuf_has_writer("webp") && format == "webp" && mime != "image/webp" {
+            pixbuf
+        } else {
+            return None; // nothing to do
+        };
+
+        let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
+        let try_save = |kind: &str, opts: &[(&str, &str)]| -> Option<Vec<u8>> {
+            scaled.save_to_bufferv(kind, opts).ok().map(|b| b.to_vec())
+        };
+        let q = quality.to_string();
+        let (out, ext, out_mime) = if format == "jpeg" {
+            (try_save("jpeg", &[("quality", &q)])?, "jpg", "image/jpeg")
+        } else if pixbuf_has_writer("webp") {
+            (try_save("webp", &[("quality", &q)])?, "webp", "image/webp")
+        } else {
+            (try_save("png", &[])?, "png", "image/png")
+        };
+        // Never "optimize" a file into a bigger one unless we also shrank it.
+        if out.len() >= bytes.len() && (w.max(h) as i64) <= max_dim.max(0) {
+            return None;
+        }
+        Some((format!("{stem}.{ext}"), out_mime.to_string(), out))
+    }
+
     fn upload_and_insert(self: &Rc<Self>, filename: String, mime: String, bytes: Vec<u8>) {
+        let (filename, mime, bytes) = match self.recompress_image(&filename, &mime, &bytes) {
+            Some(replacement) => replacement,
+            None => (filename, mime, bytes),
+        };
         // Belt for the paths that reach here without the pre-read metadata
         // check (clipboard pastes hand us bytes directly).
         let cap = self.upload_cap();
@@ -4941,6 +5017,15 @@ fn mime_for(name: &str) -> String {
 /// unparents it, so `first_child` advances; a non-row is stepped over with
 /// `next_sibling` rather than retried, which is what stops the infinite
 /// "Tried to remove non-child" loop that once wrote gigabytes of warnings.
+/// Whether gdk-pixbuf on this system can *write* the named format. Most
+/// installs read webp but cannot write it, which is what decides the png
+/// fallback in the upload recompressor.
+fn pixbuf_has_writer(name: &str) -> bool {
+    gtk::gdk_pixbuf::Pixbuf::formats()
+        .iter()
+        .any(|f| f.is_writable() && f.name().as_deref() == Some(name))
+}
+
 /// An event's moment as unix seconds, when parseable.
 fn event_unix(e: &lurker_proto::MessageEvent) -> Option<i64> {
     e.time

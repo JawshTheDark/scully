@@ -1,4 +1,8 @@
-// Scully — a native GTK4 desktop client for a self-hosted Lurker bouncer.
+// Scully — a native GTK4 desktop client for a self-hosted Lurker server.
+//
+// Lurker is an always-on IRC *client* platform (it stays connected and keeps
+// history, like a bouncer would, but the web app is a full client — Lurker
+// has a bouncer in it, it isn't one). Scully is a native front end to it.
 //
 // Named for the one at the desk who wants evidence. Sibling app to Spooky
 // (Android); both speak the Lurker client protocol, v1.

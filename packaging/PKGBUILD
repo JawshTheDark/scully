@@ -9,9 +9,9 @@
 # clang for the bindings, and alsa-lib at runtime for the microphone.
 
 pkgname=scully
-pkgver=0.1.22
+pkgver=0.1.23
 pkgrel=1
-pkgdesc="Native GTK4 client for a Lurker IRC bouncer"
+pkgdesc="Native GTK4 client for a self-hosted Lurker IRC server"
 arch=('x86_64' 'aarch64')
 url="https://github.com/JawshTheDark/scully"
 license=('MPL-2.0')
