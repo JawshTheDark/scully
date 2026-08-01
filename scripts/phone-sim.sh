@@ -28,10 +28,24 @@ W=720 H=1440
 BIN=${SCULLY_BIN:-target/debug/scully}
 [ -x "$BIN" ] || cargo build -p scully
 
+# Leftovers from a previous run poison a new one twice over: a stale nested
+# compositor still owns the socket name (kwin then falls back to WL-0 and the
+# new Scully can't find it), and a stale sim Scully still owns the D-Bus app
+# id (GApplication hands the launch off to it, and its window pops up on the
+# HOST session instead of in the phone frame). Sweep both.
+pkill -f "kwin_wayland --width ${W}" 2>/dev/null || true
+for pid in $(pgrep -f "scully" || true); do
+  if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -q "^SCULLY_APP_ID=io.jawsh.Scully.Sim"; then
+    kill "$pid" 2>/dev/null || true
+  fi
+done
+
 # A dev instance beside your real session, never inside it: separate app id
 # AND an isolated profile, so the sim cannot silently reuse the real saved
-# token. `--real` opts into the normal profile deliberately.
-export SCULLY_APP_ID=${SCULLY_APP_ID:-io.jawsh.Scully.Sim}
+# token. `--real` opts into the normal profile deliberately. The id is
+# per-run (PID suffix) so even a survivor of the sweep can't capture us.
+SOCKET="scully-sim-$$"
+export SCULLY_APP_ID=${SCULLY_APP_ID:-io.jawsh.Scully.Sim.P$$}
 
 mode=auto real=0
 for arg in "$@"; do
@@ -57,8 +71,8 @@ if [ "$mode" != "kwin" ] && command -v phosh >/dev/null 2>&1; then
 mode = ${W}x${H}
 EOF
   echo ">> nested phosh at ${W}x${H} — launch Scully from the app drawer,"
-  echo ">>   or: WAYLAND_DISPLAY=wayland-99 $BIN"
-  exec phoc -C "$ini" -S wayland-99 -E phosh
+  echo ">>   or: WAYLAND_DISPLAY=$SOCKET $BIN"
+  exec phoc -C "$ini" -S "$SOCKET" -E phosh
 fi
 
 # Fallback: kwin nested. No phone shell, but the output is phone-sized, so
@@ -68,12 +82,14 @@ fi
 # start (no session manager), which is how the first version of this script
 # produced an empty grey window.
 echo ">> nested kwin at ${W}x${H} (install phosh+phoc for the full shell)"
-kwin_wayland --width "$W" --height "$H" --socket scully-sim --no-lockscreen &
+kwin_wayland --width "$W" --height "$H" --socket "$SOCKET" --no-lockscreen &
 KWIN=$!
+# Not exec: the compositor must die WITH the app, or every quit strands a
+# black phone-frame window on the desktop.
 trap 'kill "$KWIN" 2>/dev/null' EXIT
 for _ in $(seq 1 50); do
-  [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/scully-sim" ] && break
+  [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$SOCKET" ] && break
   kill -0 "$KWIN" 2>/dev/null || { echo "kwin died"; exit 1; }
   sleep 0.2
 done
-WAYLAND_DISPLAY=scully-sim exec "$BIN"
+WAYLAND_DISPLAY="$SOCKET" "$BIN"
