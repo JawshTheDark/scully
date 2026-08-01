@@ -344,7 +344,6 @@ impl Rest {
         Ok(Self::check(resp).await?.json().await?)
     }
 
-    /// `GET /api/networks` — the roster, and a token-validity check.
     /// `GET /api/uploaders` — the uploaders you may send to, the drivers that
     /// describe them, and your current selection. Rows and drivers stay as
     /// JSON: the form the client renders is the driver's own `configSchema`,
@@ -409,6 +408,7 @@ impl Rest {
         Ok(())
     }
 
+    /// `GET /api/networks` — the roster, and a token-validity check.
     pub async fn networks(&self) -> Result<Vec<NetworkRow>> {
         let resp = self.authed(self.http.get(self.url("api/networks")?)).send().await?;
         let env: NetworksEnvelope = Self::check(resp).await?.json().await?;

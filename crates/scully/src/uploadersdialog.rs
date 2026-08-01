@@ -28,12 +28,16 @@ pub fn open(app: &AppRef) {
 }
 
 fn build(app: &AppRef, info: lurker_client::UploadersInfo) {
+    // This runs in an async completion callback: the user may have closed the
+    // last window while the fetch was in flight, and windows()[0] on an empty
+    // list aborts the process. No window, no dialog.
+    let Some(parent) = app.gtk_app.windows().into_iter().next() else { return };
     let window = gtk::Window::builder()
         .title("Uploads")
         .default_width(520)
         .default_height(420)
         .modal(false)
-        .transient_for(&app.gtk_app.windows()[0])
+        .transient_for(&parent)
         .destroy_with_parent(true)
         .build();
     crate::fit_to_screen(&window);
@@ -375,18 +379,25 @@ fn open_editor(
         let window = window.clone();
         let parent = parent.clone();
         save.connect_clicked(move |_| {
+            let label = label_entry.text().trim().to_string();
+            // The server's readLabel treats a blank label as "keep the old
+            // one" on PATCH — a cleared Name would be silently ignored, which
+            // reads as a client bug. Refuse it up front instead.
+            if label.is_empty() && editing_id.is_some() {
+                status.set_text("Name can't be empty — delete the uploader instead.");
+                return;
+            }
             let mut values = serde_json::Map::new();
             for (key, entry, is_secret) in &fields {
                 let v = entry.text().to_string();
                 // An untouched secret on edit is omitted → server keeps the
-                // stored one. Everything else is sent, blanks included, so a
-                // cleared field really clears.
+                // stored one. Non-secret fields are sent blanks included, so
+                // a cleared config field really clears.
                 if *is_secret && v.is_empty() && editing_id.is_some() {
                     continue;
                 }
                 values.insert(key.clone(), serde_json::Value::String(v));
             }
-            let label = label_entry.text().trim().to_string();
             let Some(rest) = app.rest.borrow().clone() else { return };
             let app2 = app.clone();
             let window = window.clone();

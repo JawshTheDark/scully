@@ -190,6 +190,8 @@ pub struct ChatWindow {
     prev_row: RefCell<Option<PrevRow>>,
     /// Counts appended rows for the alternate-row striping.
     row_parity: Cell<u64>,
+    /// input.suggestion_strip_on_desktop, cached — read per keystroke.
+    strip_on_desktop: Cell<bool>,
     /// Armed after the first Send press on a message that will split
     /// (`chat.allow_split_messages` off): the second press confirms. Cleared
     /// by any edit or buffer switch.
@@ -580,6 +582,7 @@ impl ChatWindow {
             mirc_palette: RefCell::new(Vec::new()),
             prev_row: RefCell::new(None),
             row_parity: Cell::new(0),
+            strip_on_desktop: Cell::new(false),
             pending_split_confirm: Cell::new(false),
             time_fmt: RefCell::new("%H:%M:%S".to_string()),
             paging: Cell::new(false),
@@ -912,59 +915,24 @@ impl ChatWindow {
         });
         self.text_view.add_controller(clicks);
 
-        // Right-click (and long-press, for touch) in a DM conversation opens
-        // the peer's menu — whois, CTCP, add-to-friends (#6). A DM has no
-        // nicklist, so this is its only route to those actions. Channels keep
-        // their nicklist for it; the gesture stays inert there.
+        // DM person actions (#6) ride the TextView's own context menu via
+        // set_extra_menu (populated per-buffer in activate): whois, CTCP and
+        // add-to-friends appear UNDER the built-in Copy/Select-All items.
+        // The first version claimed every right-click and long-press with
+        // custom gestures, which made copying DM text impossible with a
+        // mouse and hijacked touch text-selection — the built-in menu also
+        // handles long-press for us, so touch needs nothing extra. Only the
+        // action group is installed here; it is per-window state.
         let this = self.clone();
-        let peer_click = gtk::GestureClick::builder().button(3).build();
-        peer_click.connect_pressed(move |gesture, _, x, y| {
-            let Some(key) = this.active.borrow().clone() else { return };
-            if !key.is_dm() {
-                return;
+        let peer_group = gio::SimpleActionGroup::new();
+        let peer_action = gio::SimpleAction::new("cmd", Some(glib::VariantTy::STRING));
+        peer_action.connect_activate(move |_, param| {
+            if let Some(id) = param.and_then(|p| p.get::<String>()) {
+                this.run_nick_command(&id);
             }
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-            let peer = this
-                .app
-                .store
-                .borrow()
-                .buffer(&key)
-                .map(|b| b.display_name.clone())
-                .unwrap_or_else(|| key.target.clone());
-            *this.menu_nick.borrow_mut() = peer.clone();
-            let (px, py) = this
-                .text_view
-                .compute_point(&this.centre_pane, &gtk::graphene::Point::new(x as f32, y as f32))
-                .map(|p| (p.x() as i32, p.y() as i32))
-                .unwrap_or((x as i32, y as i32));
-            this.open_peer_menu(&peer, px, py);
         });
-        self.text_view.add_controller(peer_click);
-
-        let this = self.clone();
-        let peer_hold = gtk::GestureLongPress::new();
-        peer_hold.connect_pressed(move |gesture, x, y| {
-            let Some(key) = this.active.borrow().clone() else { return };
-            if !key.is_dm() {
-                return;
-            }
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-            let peer = this
-                .app
-                .store
-                .borrow()
-                .buffer(&key)
-                .map(|b| b.display_name.clone())
-                .unwrap_or_else(|| key.target.clone());
-            *this.menu_nick.borrow_mut() = peer.clone();
-            let (px, py) = this
-                .text_view
-                .compute_point(&this.centre_pane, &gtk::graphene::Point::new(x as f32, y as f32))
-                .map(|p| (p.x() as i32, p.y() as i32))
-                .unwrap_or((x as i32, y as i32));
-            this.open_peer_menu(&peer, px, py);
-        });
-        self.text_view.add_controller(peer_hold);
+        peer_group.add_action(&peer_action);
+        self.text_view.insert_action_group("nick", Some(&peer_group));
 
         // Pointer cursor over links.
         let this = self.clone();
@@ -1794,6 +1762,7 @@ impl ChatWindow {
         self.keep_position_on_send.set(get_bool("chat.keep_position_on_send", false));
         // `input.show_format_button`: the palette lives in the composer row.
         self.btn_format.set_visible(get_bool("input.show_format_button", false));
+        self.strip_on_desktop.set(get_bool("input.suggestion_strip_on_desktop", false));
         *self.unread_display.borrow_mut() = get_str("look.buffer_list.unread_display", "full");
         self.unread_bold.set(get_bool("look.buffer_list.unread_bold", false));
         self.lag_min_show_ms.set(get_int("look.bar.lag_min_show_ms", 500));
@@ -2572,6 +2541,11 @@ impl ChatWindow {
         *self.active.borrow_mut() = Some(key.clone());
         self.pending_split_confirm.set(false);
         self.update_member_pane();
+        self.update_peer_menu(key);
+        // Chips from the previous buffer must not survive the switch: the
+        // changed signal alone won't fire when the restored draft is
+        // textually identical (both empty is the common case).
+        self.refresh_suggestion_strip();
         self.paging.set(false);
         self.history_pos.set(None);
         *self.completion.borrow_mut() = None;
@@ -2972,10 +2946,6 @@ impl ChatWindow {
         );
     }
 
-    /// Remove every embedded child widget from the TextView while the buffer
-    /// is still valid. Call this immediately before `set_text("")` so GTK
-    /// never unmaps a child against a half-cleared buffer (the SIGSEGV in
-    /// `gtk_text_view_remove` the coredump pinned).
     /// A poster button that only constructs the real media widget — and with
     /// it the native pipeline — when the user presses play.
     fn deferred_player(url: &str, audio: bool) -> gtk::Widget {
@@ -2988,9 +2958,14 @@ impl ChatWindow {
             .build();
         container.append(&poster);
 
-        let container_ref = container.clone();
+        // Weak, or the closure (owned by the poster, owned by the container)
+        // would strongly capture the container: a reference cycle that leaks
+        // every embed and keeps a playing MediaFile alive past clear_embeds —
+        // ghost audio with no widget left to stop it.
+        let container_ref = container.downgrade();
         let url = url.to_string();
         poster.connect_clicked(move |btn| {
+            let Some(container_ref) = container_ref.upgrade() else { return };
             let media = gtk::MediaFile::for_file(&gtk::gio::File::for_uri(&url));
             let widget: gtk::Widget = if audio {
                 let controls = gtk::MediaControls::new(Some(&media));
@@ -3009,6 +2984,10 @@ impl ChatWindow {
         container.upcast()
     }
 
+    /// Remove every embedded child widget from the TextView while the buffer
+    /// is still valid. Call this immediately before `set_text("")` so GTK
+    /// never unmaps a child against a half-cleared buffer (the SIGSEGV in
+    /// `gtk_text_view_remove` the coredump pinned).
     fn clear_embeds(&self) {
         for widget in self.embeds.borrow_mut().drain(..) {
             // The widget's parent is the TextView; remove there.
@@ -3115,35 +3094,6 @@ impl ChatWindow {
         *self.prev_row.borrow_mut() =
             Some(PrevRow { author: line.author.clone(), unix: line.unix, stamp });
 
-        // `look.color.message.alt_bg` / `alt_fg`: every other row striped, as
-        // the website does. The tag sits at priority 0, beneath every other
-        // tag, so nick colours and inline formatting still win; only hex
-        // values engage (the web default is a CSS var GTK cannot resolve,
-        // which means "off").
-        let n = self.row_parity.get();
-        self.row_parity.set(n.wrapping_add(1));
-        if n % 2 == 1 {
-            if let Some(tag) = self.alt_row_tag() {
-                let end = self.text.end_iter();
-                let mut start = end;
-                start.set_line_offset(0);
-                self.text.apply_tag(&tag, &start, &end);
-            }
-        }
-
-        // A highlight paints its WHOLE line, Spooky-style (#8): a dark-gold
-        // wash makes mentions findable while scrolling, where a coloured text
-        // run alone disappears into the noise. Derived from the warn colour
-        // at low alpha so a custom palette recolours it too.
-        if line.kind == format::LineKind::Highlight {
-            if let Some(tag) = self.highlight_row_tag() {
-                let end = self.text.end_iter();
-                let mut start = end;
-                start.set_line_offset(0);
-                self.text.apply_tag(&tag, &start, &end);
-            }
-        }
-
         // The message body carries IRC formatting codes inline. Parsing splits
         // it into styled runs and drops the control characters, which is what
         // stops a colour chart rendering as a row of `▯` boxes.
@@ -3171,6 +3121,36 @@ impl ChatWindow {
             }
         }
 
+        // Row-level washes go on AFTER the body exists, or the tag's range
+        // covers only the time/nick columns — it painted anyway (paragraph
+        // backgrounds bleed across the display line) but any consumer of the
+        // tag's character range would miss the message text entirely.
+        //
+        // `look.color.message.alt_bg` / `alt_fg`: every other row striped, as
+        // the website does. Priority 0, beneath every other tag, so nick
+        // colours and inline formatting still win; hex values only (the web
+        // default is a CSS var GTK cannot resolve, which means "off").
+        let n = self.row_parity.get();
+        self.row_parity.set(n.wrapping_add(1));
+        if n % 2 == 1 {
+            if let Some(tag) = self.alt_row_tag() {
+                let end = self.text.end_iter();
+                let mut start = end;
+                start.set_line_offset(0);
+                self.text.apply_tag(&tag, &start, &end);
+            }
+        }
+        // A highlight paints its WHOLE line, Spooky-style (#8): a dark-gold
+        // wash makes mentions findable while scrolling. Derived from the warn
+        // colour at low alpha so a custom palette recolours it too.
+        if line.kind == format::LineKind::Highlight {
+            if let Some(tag) = self.highlight_row_tag() {
+                let end = self.text.end_iter();
+                let mut start = end;
+                start.set_line_offset(0);
+                self.text.apply_tag(&tag, &start, &end);
+            }
+        }
     }
 
     /// The striping tag for alternate rows, or `None` when striping is off.
@@ -3481,17 +3461,6 @@ impl ChatWindow {
     /// which is what stops actions rendering greyed-out and dead, the symptom
     /// of an action group the menu could not see.
     fn open_nick_menu(self: &Rc<Self>, nick: &str, x: i32, y: i32) {
-        self.open_nick_menu_impl(nick, x, y, false)
-    }
-
-    /// The same menu, anchored in the conversation pane — how a DM offers
-    /// whois/CTCP/friend actions for its peer (#6), since it has no nicklist
-    /// to right-click.
-    fn open_peer_menu(self: &Rc<Self>, nick: &str, x: i32, y: i32) {
-        self.open_nick_menu_impl(nick, x, y, true)
-    }
-
-    fn open_nick_menu_impl(self: &Rc<Self>, nick: &str, x: i32, y: i32, in_conversation: bool) {
         // Dismiss any lingering menu.
         if let Some(old) = self.nick_menu.borrow_mut().take() {
             old.unparent();
@@ -3550,23 +3519,16 @@ impl ChatWindow {
 
         let popover = gtk::PopoverMenu::from_model(Some(&model));
         popover.insert_action_group("nick", Some(&group));
-        // Parented to a PANE, never a list. A popover anchored inside a
+        // Parented to the PANE, not the list. A popover anchored inside a
         // ScrolledWindow is constrained to the scrolled viewport, so GTK gives
-        // it its own scrollbar — a five-item menu that scrolls. Panes do not
-        // scroll, so the menu is free to be its natural height. In a DM the
-        // member pane is hidden (a hidden parent never maps its popover), so
-        // the conversation pane hosts it there.
-        let (parent, px, py): (gtk::Widget, i32, i32) = if in_conversation {
-            (self.centre_pane.clone().upcast(), x, y)
-        } else {
-            let (px, py) = self
-                .member_list
-                .compute_point(&self.member_pane, &gtk::graphene::Point::new(x as f32, y as f32))
-                .map(|p| (p.x() as i32, p.y() as i32))
-                .unwrap_or((x, y));
-            (self.member_pane.clone().upcast(), px, py)
-        };
-        popover.set_parent(&parent);
+        // it its own scrollbar — a five-item menu that scrolls. The pane does
+        // not scroll, so the menu is free to be its natural height.
+        let (px, py) = self
+            .member_list
+            .compute_point(&self.member_pane, &gtk::graphene::Point::new(x as f32, y as f32))
+            .map(|p| (p.x() as i32, p.y() as i32))
+            .unwrap_or((x, y));
+        popover.set_parent(&self.member_pane);
         popover.set_autohide(false);
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
@@ -3574,6 +3536,37 @@ impl ChatWindow {
 
         popover.popup();
         *self.nick_menu.borrow_mut() = Some(popover);
+    }
+
+    /// Point the conversation's context menu at the current buffer: in a DM
+    /// the built-in Copy/Select-All menu gains the peer's person actions
+    /// (#6); everywhere else it stays stock.
+    fn update_peer_menu(&self, key: &BufferKey) {
+        if !key.is_dm() {
+            self.text_view.set_extra_menu(None::<&gio::MenuModel>);
+            return;
+        }
+        let store = self.app.store.borrow();
+        let peer = store
+            .buffer(key)
+            .map(|b| b.display_name.clone())
+            .unwrap_or_else(|| key.target.clone());
+        let already = key
+            .network_id
+            .is_some_and(|net| store.contact_for(net, &peer).is_some());
+        drop(store);
+        *self.menu_nick.borrow_mut() = peer;
+
+        // Rank::None: there is no channel here, so no mode ladder — just the
+        // person actions (whois, query, slap, CTCP, ignore) plus friends.
+        let model = crate::nickmenu::menu_model(crate::nickmenu::Rank::None);
+        let friend = gio::Menu::new();
+        friend.append_item(&gio::MenuItem::new(
+            Some(if already { "Edit friend\u{2026}" } else { "Add to friends\u{2026}" }),
+            Some("nick.cmd::friend"),
+        ));
+        model.append_section(None, &friend);
+        self.text_view.set_extra_menu(Some(&model));
     }
 
     /// Open the buffer-list context menu for `key` at (x, y) in the list. The
@@ -4020,12 +4013,20 @@ impl ChatWindow {
             }
             "whois" => {
                 // Only offered on DM rows, whose target is the peer's nick.
+                // The reply is routed to the DM that was right-clicked, NOT
+                // the active buffer — whois for one person must never render
+                // into an unrelated channel that happened to be on screen.
                 if let Some(net) = key.network_id {
-                    self.note_whois(&target);
-                    self.app.send(ClientVerb::Raw {
-                        network_id: net,
-                        line: format!("WHOIS {target} {target}"),
-                    });
+                    self.note_whois_for(&target, key.clone());
+                    for verb in crate::nickmenu::verbs_for(
+                        crate::nickmenu::Cmd::Whois,
+                        net,
+                        "",
+                        &target,
+                        None,
+                    ) {
+                        self.app.send(verb);
+                    }
                 }
             }
             "read" => {
@@ -4100,10 +4101,18 @@ impl ChatWindow {
     /// Record a pending whois for the active buffer, if the "show in active
     /// buffer" setting is on. Called from both the nick menu and `/whois`.
     fn note_whois(&self, nick: &str) {
+        let dest = self.active.borrow().clone();
+        match dest {
+            Some(key) => self.note_whois_for(nick, key),
+            None => self.status_label.set_text(&format!("whois {nick}…")),
+        }
+    }
+
+    /// Route a pending whois reply to an explicit buffer — the DM-row menu's
+    /// case, where the buffer the user asked FROM is not the one on screen.
+    fn note_whois_for(&self, nick: &str, key: BufferKey) {
         if self.app.device.borrow().whois_in_active_buffer {
-            if let Some(key) = self.active.borrow().clone() {
-                self.pending_whois.borrow_mut().insert(lurker_proto::fold(nick), key);
-            }
+            self.pending_whois.borrow_mut().insert(lurker_proto::fold(nick), key);
             self.status_label.set_text(&format!("whois {nick}…"));
         } else {
             self.status_label.set_text("whois sent — reply lands in the server log");
@@ -4488,25 +4497,34 @@ impl ChatWindow {
         self.status_label
             .set_text(&format!("uploading {filename} ({} KB)…", bytes.len() / 1024));
         let this = self.clone();
-        self.app.upload(filename, mime, bytes, move |result| match result {
-            Ok(url) => {
-                // Insert at the cursor, space-padded so it can't fuse with
-                // adjacent words.
-                let mut pos = this.entry.position();
-                let text = this.entry.text();
-                let pad_before = pos > 0
-                    && !text
-                        .chars()
-                        .nth(pos as usize - 1)
-                        .is_none_or(char::is_whitespace);
-                let insert =
-                    format!("{}{url} ", if pad_before { " " } else { "" });
-                this.entry.insert_text(&insert, &mut pos);
-                this.entry.set_position(pos);
-                this.entry.grab_focus();
-                this.update_status();
+        self.app.upload(filename, mime, bytes, move |result| {
+            // ONE reset path, before the arms split: no outcome — and no
+            // future early return inside an arm — can strand the disabled
+            // spinner button.
+            this.btn_attach.set_sensitive(true);
+            this.btn_attach.set_icon_name("mail-attachment-symbolic");
+            match result {
+                Ok(url) => {
+                    // Insert at the cursor, space-padded so it can't fuse
+                    // with adjacent words.
+                    let mut pos = this.entry.position();
+                    let text = this.entry.text();
+                    let pad_before = pos > 0
+                        && !text
+                            .chars()
+                            .nth(pos as usize - 1)
+                            .is_none_or(char::is_whitespace);
+                    let insert = format!("{}{url} ", if pad_before { " " } else { "" });
+                    this.entry.insert_text(&insert, &mut pos);
+                    this.entry.set_position(pos);
+                    // NOT grab_focus(): on a GtkEntry that selects the whole
+                    // contents, so the freshly inserted link sat marked and
+                    // the next keystroke replaced it (#9).
+                    this.entry.grab_focus_without_selecting();
+                    this.update_status();
+                }
+                Err(e) => this.status_label.set_text(&format!("upload failed: {e}")),
             }
-            Err(e) => this.status_label.set_text(&format!("upload failed: {e}")),
         });
     }
 
@@ -4579,17 +4597,16 @@ impl ChatWindow {
         let Some(buf) = store.buffer(&key) else { return };
 
         let mut members: Vec<_> = buf.members.values().collect();
-        // Ops first, then by nick — the conventional IRC nicklist order.
-        members.sort_by_key(|m| {
-            let rank = match m.highest_mode() {
-                Some("q") => 0,
-                Some("a") => 1,
-                Some("o") => 2,
-                Some("h") => 3,
-                Some("v") => 4,
-                _ => 5,
-            };
-            (rank, m.nick.to_ascii_lowercase())
+        // Ops first, then by nick — the conventional IRC nicklist order. The
+        // rank comes from nickmenu::Rank (the one table shared with menu
+        // gating), not a private copy that could drift; cached_key because
+        // the key allocates and sort_by_key would recompute it per
+        // comparison — ~11x the work during a netsplit-rejoin churn.
+        members.sort_by_cached_key(|m| {
+            (
+                std::cmp::Reverse(crate::nickmenu::Rank::from_mode(m.highest_mode())),
+                m.nick.to_ascii_lowercase(),
+            )
         });
         self.member_count.set_text(&format!("{} members", members.len()));
 
@@ -4921,22 +4938,22 @@ impl ChatWindow {
 
     /// Apply a colour pick from the palette: merge into any colour code
     /// already at the cursor, replacing the merged span.
+    /// Deliberately does NOT focus the entry: picks come from the palette
+    /// popover, and stealing focus out of an autohide popover dismisses it —
+    /// which would kill the left-then-right fg/bg flow on the first click.
+    /// The popover's closed handler refocuses the entry instead.
     fn pick_color(&self, index: u8, background: bool) {
         let text = self.entry.text().to_string();
         let cursor = self.entry.position().max(0) as usize;
         let before: String = text.chars().take(cursor).collect();
         let (span, code) = crate::input::merge_color_code(&before, index, background);
+        let start = (cursor - span) as i32;
         if span > 0 {
-            let start = (cursor - span) as i32;
             self.entry.delete_text(start, cursor as i32);
-            let mut pos = start;
-            self.entry.insert_text(&code, &mut pos);
-            self.entry.set_position(pos);
-        } else {
-            self.insert_format(&code);
-            return;
         }
-        self.entry.grab_focus_without_selecting();
+        let mut pos = start;
+        self.entry.insert_text(&code, &mut pos);
+        self.entry.set_position(pos);
     }
 
     /// Insert an IRC formatting code at the cursor (composer keyboard
@@ -4973,7 +4990,13 @@ impl ChatWindow {
                 .build();
             let this = self.clone();
             let code = code.to_string();
-            b.connect_clicked(move |_| this.insert_format(&code));
+            // Insert without focusing — see pick_color: focus-out dismisses
+            // the autohide popover mid-flow.
+            b.connect_clicked(move |_| {
+                let mut pos = this.entry.position();
+                this.entry.insert_text(&code, &mut pos);
+                this.entry.set_position(pos);
+            });
             styles.append(&b);
         }
         root.append(&styles);
@@ -5018,7 +5041,14 @@ impl ChatWindow {
 
         let popover = gtk::Popover::builder().child(&root).build();
         popover.set_parent(&self.btn_format);
-        popover.connect_closed(|p| p.unparent());
+        let weak = self.clone_handle();
+        popover.connect_closed(move |p| {
+            p.unparent();
+            // Hand focus back so typing continues right after the picks.
+            if let Some(this) = weak.upgrade() {
+                this.entry.grab_focus_without_selecting();
+            }
+        });
         popover.popup();
     }
 
@@ -5026,12 +5056,9 @@ impl ChatWindow {
     /// the same candidates Tab cycles through; tapping one applies it exactly
     /// as Tab would.
     fn refresh_suggestion_strip(self: &Rc<Self>) {
-        let on = self.narrow.get()
-            || self
-                .app
-                .setting("input.suggestion_strip_on_desktop")
-                .as_bool()
-                .unwrap_or(false);
+        // Cached in apply_display_settings: this runs per keystroke, and the
+        // settings fallback path is a linear scan of the whole registry.
+        let on = self.narrow.get() || self.strip_on_desktop.get();
         if !on {
             self.strip_scroll.set_visible(false);
             return;
@@ -5040,7 +5067,7 @@ impl ChatWindow {
         let text = self.entry.text().to_string();
         let cursor = self.entry.position().max(0) as usize;
         let found = self.completion_candidates(&text, cursor);
-        let Some((anchor, kind, candidates)) = found else {
+        let Some((_anchor, _kind, candidates)) = found else {
             self.strip_scroll.set_visible(false);
             return;
         };
@@ -5054,9 +5081,18 @@ impl ChatWindow {
                 .css_classes(["suggestion-chip"])
                 .build();
             let this = self.clone_handle();
-            let text = text.clone();
             chip.connect_clicked(move |_| {
                 let Some(this) = this.upgrade() else { return };
+                // Re-derive against the LIVE entry, exactly as Tab would: a
+                // chip built from one buffer's state must never rewrite the
+                // composer from a stale snapshot (buffer switches with
+                // identical text emit no changed signal to rebuild us).
+                let text = this.entry.text().to_string();
+                let cursor = this.entry.position().max(0) as usize;
+                let Some((anchor, kind, _)) = this.completion_candidates(&text, cursor)
+                else {
+                    return;
+                };
                 let (new_text, new_cursor) =
                     crate::input::complete(&text, cursor, anchor, &value, kind);
                 this.entry.set_text(&new_text);
