@@ -1500,12 +1500,26 @@ impl ChatWindow {
                 self.buffer_pane.set_visible(show);
             }
         }
-        // A DM has two people in it and you are one of them; a member list
-        // there is a column of nothing. Channels only.
-        let is_channel = self.active.borrow().as_ref().is_some_and(|k| k.is_channel());
-        if let Some(show) = self.app.setting("look.layout.show_member_list").as_bool() {
-            self.member_pane.set_visible(show && is_channel);
+        self.update_member_pane();
+    }
+
+    /// Show or hide the nicklist for whatever is currently open.
+    ///
+    /// A DM has two people in it and you are one of them, so a member list
+    /// there is a column of nothing — channels only. This has to run on every
+    /// buffer switch, not just when settings change: it depends on the active
+    /// buffer, and at construction there isn't one, so a rule evaluated only
+    /// from `apply_display_settings` latches hidden and the nicklist never
+    /// comes back.
+    fn update_member_pane(&self) {
+        // Narrow mode owns the panes outright — there the nicklist is a
+        // separate view reached from a button, not a column.
+        if self.narrow.get() || self.pinned.is_some() {
+            return;
         }
+        let is_channel = self.active.borrow().as_ref().is_some_and(|k| k.is_channel());
+        let show = self.app.setting("look.layout.show_member_list").as_bool().unwrap_or(true);
+        self.member_pane.set_visible(show && is_channel);
     }
 
     fn raise_notification(&self, key: &BufferKey, event: &lurker_proto::MessageEvent) {
@@ -2154,6 +2168,7 @@ impl ChatWindow {
         self.save_draft();
 
         *self.active.borrow_mut() = Some(key.clone());
+        self.update_member_pane();
         self.paging.set(false);
         self.history_pos.set(None);
         *self.completion.borrow_mut() = None;
