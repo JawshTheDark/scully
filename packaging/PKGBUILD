@@ -9,7 +9,7 @@
 # clang for the bindings, and alsa-lib at runtime for the microphone.
 
 pkgname=scully
-pkgver=0.1.19
+pkgver=0.1.20
 pkgrel=1
 pkgdesc="Native GTK4 client for a Lurker IRC bouncer"
 arch=('x86_64' 'aarch64')
@@ -22,7 +22,9 @@ makedepends=('rust' 'clang' 'pkgconf')
 # exports then comes back undefined at link time — webrtc-sys is the first
 # thing to fall over. Verified: with lto on, the build dies on
 # `ring_core_0_17_14__CRYPTO_memcmp`; with it off, it completes.
-options=('!lto')
+# !debug: without it makepkg splits out a scully-debug package of stripped
+# symbols, which on CI just doubles the artefact list for no one.
+options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # GitHub's generated tag tarballs carry no published checksum to pin against,
 # and the tag is the thing being trusted here.

@@ -1475,6 +1475,9 @@ impl ChatWindow {
     /// layout: sidebar visibility, timestamp format, nick palette.
     fn apply_display_settings(&self) {
         self.retint_nick_tags();
+        // The nicklist derives its colours from the same palette, but its
+        // labels are plain widgets, not retintable tags — rebuild them.
+        self.rebuild_member_list();
         let is_popout = self.pinned.is_some();
         let fmt = self
             .app
@@ -3818,16 +3821,43 @@ impl ChatWindow {
         self.member_count.set_text(&format!("{} members", members.len()));
 
         *self.member_nicks.borrow_mut() = members.iter().map(|m| m.nick.clone()).collect();
+
+        // The nicklist wears the same colours as the buffer: the colour is a
+        // pure function of the folded nick and palette size, so computing it
+        // here with the same hash keeps the two views in agreement without any
+        // shared state. Your own nick takes the self colour, as it does in the
+        // scrollback.
+        let palette = crate::theme::nick_palette(&self.app);
+        let self_colour =
+            crate::theme::self_color(&self.app).unwrap_or_else(|| "#9aa0b0".to_string());
+        let my_nick = key
+            .network_id
+            .and_then(|id| store.networks.get(&id))
+            .and_then(|n| n.nick.as_deref().map(lurker_proto::fold));
+
         for m in members {
             let sigil = m.sigil().map(|c| c.to_string()).unwrap_or_default();
             let label = gtk::Label::builder()
                 .xalign(0.0)
-                .label(format!("{sigil}{}", m.nick))
                 .ellipsize(gtk::pango::EllipsizeMode::End)
                 .build();
             label.add_css_class("member");
             if m.away {
+                // Away wins over the palette: the grey IS the away signal, and
+                // a coloured-but-away nick would read as present.
                 label.add_css_class("away");
+                label.set_text(&format!("{sigil}{}", m.nick));
+            } else {
+                let colour = if my_nick.as_deref() == Some(lurker_proto::fold(&m.nick).as_str()) {
+                    self_colour.clone()
+                } else {
+                    let idx = crate::format::nick_color_index(&m.nick, palette.len());
+                    palette.get(idx).cloned().unwrap_or_else(|| "#939293".to_string())
+                };
+                label.set_markup(&format!(
+                    "<span foreground=\"{colour}\">{}</span>",
+                    glib::markup_escape_text(&format!("{sigil}{}", m.nick)),
+                ));
             }
             let row = gtk::ListBoxRow::builder().child(&label).selectable(false).build();
             self.member_list.append(&row);
