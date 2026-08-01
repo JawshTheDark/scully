@@ -171,6 +171,11 @@ row.buffer-row.has-unread label {
   color: @fg;
 }
 
+/* look.buffer_list.unread_bold: weight on top of the colour, opt-in. */
+row.buffer-row.unread-bold label {
+  font-weight: 700;
+}
+
 row.buffer-row.parted label {
   /* Parted but not closed: history is still there, so recede rather than hide. */
   color: #4a4a58;

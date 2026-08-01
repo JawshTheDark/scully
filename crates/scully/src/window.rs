@@ -39,6 +39,16 @@ const BOTTOM_EPSILON: f64 = 40.0;
 /// Baseline top padding, before any bottom-anchoring pad is added.
 const BASE_TOP_MARGIN: i32 = 6;
 
+/// What the collapse rules need to remember about the row just appended:
+/// its author (None for presence/server rows), its moment, and its rendered
+/// timestamp string.
+#[derive(Clone)]
+struct PrevRow {
+    author: Option<String>,
+    unix: Option<i64>,
+    stamp: String,
+}
+
 pub struct ChatWindow {
     app: AppRef,
     window: gtk::ApplicationWindow,
@@ -151,6 +161,30 @@ pub struct ChatWindow {
     palette_len: Cell<usize>,
     /// Cached strftime timestamp format.
     time_fmt: RefCell<String>,
+    /// Settings snapshot for line rendering, rebuilt on SettingsChanged.
+    render_opts: RefCell<format::RenderOpts>,
+    /// look.message.collapse_authors / _window / collapse_timestamps.
+    collapse_authors: Cell<bool>,
+    collapse_window_secs: Cell<i64>,
+    collapse_timestamps: Cell<bool>,
+    /// look.nick.show_mode_prefix: @/+/% before the author in messages.
+    show_mode_prefix: Cell<bool>,
+    /// chat.keep_position_on_send: when false (the default), sending jumps
+    /// the view to the newest message.
+    keep_position_on_send: Cell<bool>,
+    /// look.buffer_list.unread_display / unread_bold.
+    unread_display: RefCell<String>,
+    unread_bold: Cell<bool>,
+    /// look.bar.*: lag thresholds and the status-bar clock format.
+    lag_min_show_ms: Cell<i64>,
+    lag_alarm_ms: Cell<i64>,
+    lag_always_show: Cell<bool>,
+    bar_time_fmt: RefCell<String>,
+    /// look.color.mirc_colors overrides, index → colour, hex entries only.
+    mirc_palette: RefCell<Vec<Option<String>>>,
+    /// The previous appended row, for the collapse rules. Cleared whenever
+    /// the buffer is redrawn from scratch.
+    prev_row: RefCell<Option<PrevRow>>,
     /// Whether the view should follow new content to the bottom. Set by real
     /// user scrolls only; a programmatic scroll must not flip it (hence
     /// [`ChatWindow::programmatic`]). This replaces snapshotting "am I at the
@@ -482,6 +516,20 @@ impl ChatWindow {
             completion: RefCell::new(None),
             typing_sent: Cell::new(None),
             palette_len: Cell::new(format::DEFAULT_NICK_PALETTE.len()),
+            render_opts: RefCell::new(format::RenderOpts::default()),
+            collapse_authors: Cell::new(false),
+            collapse_window_secs: Cell::new(300),
+            collapse_timestamps: Cell::new(true),
+            show_mode_prefix: Cell::new(false),
+            keep_position_on_send: Cell::new(false),
+            unread_display: RefCell::new("full".to_string()),
+            unread_bold: Cell::new(false),
+            lag_min_show_ms: Cell::new(500),
+            lag_alarm_ms: Cell::new(2000),
+            lag_always_show: Cell::new(false),
+            bar_time_fmt: RefCell::new(String::new()),
+            mirc_palette: RefCell::new(Vec::new()),
+            prev_row: RefCell::new(None),
             time_fmt: RefCell::new("%H:%M:%S".to_string()),
             paging: Cell::new(false),
             stick_bottom: Cell::new(true),
@@ -601,9 +649,10 @@ impl ChatWindow {
             .justification(gtk::Justification::Center)
             .build());
         add(gtk::TextTag::builder().name("time").foreground("#5a5a6e").build());
-        // Space above a speaker heading, so each turn in the conversation is
-        // visually separated instead of the log being one dense block.
-        add(gtk::TextTag::builder().name("author").pixels_above_lines(8).build());
+        // Weight only. The old grouped layout gave headings 8px of air above;
+        // in the classic per-line layout every message row carries this tag,
+        // so that padding would space out the entire log.
+        add(gtk::TextTag::builder().name("author").build());
         add(gtk::TextTag::builder().name("msg").foreground("#c9c9d4").build());
         add(gtk::TextTag::builder().name("msg-self").foreground("#9aa0b0").build());
         add(gtk::TextTag::builder().name("msg-highlight").foreground("#ffd479").weight(700).build(),
@@ -652,6 +701,26 @@ impl ChatWindow {
                     table.add(&tag);
                 }
             }
+        }
+        // `look.color.link`: the clickable-URL colour, live like the rest of
+        // the palette.
+        if let Some(link) = self
+            .app
+            .setting("look.color.link")
+            .as_str()
+            .filter(|c| c.starts_with('#'))
+        {
+            if let Some(tag) = table.lookup("link") {
+                tag.set_property("foreground", link);
+            }
+        }
+        // `look.action.italic`: whether /me lines slant.
+        if let Some(tag) = table.lookup("action") {
+            let italic = self.app.setting("look.action.italic").as_bool().unwrap_or(true);
+            tag.set_property(
+                "style",
+                if italic { gtk::pango::Style::Italic } else { gtk::pango::Style::Normal },
+            );
         }
         let self_colour =
             crate::theme::self_color(&self.app).unwrap_or_else(|| "#9aa0b0".to_string());
@@ -869,6 +938,14 @@ impl ChatWindow {
                 entry.set_text("");
                 this.history_pos.set(None);
                 this.signal_typing("done");
+                // `chat.keep_position_on_send` (default off): sending jumps
+                // to the newest message so your own line is visible when it
+                // echoes back. On: hold the reading position — the web's
+                // read-back-while-replying mode.
+                if !this.keep_position_on_send.get() {
+                    this.stick_bottom.set(true);
+                    this.reflow();
+                }
                 // The sent line joins recall history immediately; the server
                 // echoes it back via `input-history-added` for other devices.
                 if let Some(key) = this.active.borrow().clone() {
@@ -935,6 +1012,18 @@ impl ChatWindow {
             if !entry.text().is_empty() {
                 this.signal_typing("active");
             }
+        });
+
+        // The status-bar clock (`look.bar.time_format`) ticks once a second
+        // while a format is set. Weak, as below: the ticker must not keep a
+        // closed window alive.
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_seconds_local(1, move || {
+            let Some(this) = weak.upgrade() else { return glib::ControlFlow::Break };
+            if !this.bar_time_fmt.borrow().is_empty() {
+                this.update_status();
+            }
+            glib::ControlFlow::Continue
         });
 
         // The typing display expires by time, so tick the status line while
@@ -1380,6 +1469,12 @@ impl ChatWindow {
         let was = self.narrow.get();
         let now = self.window.width() > 0 && self.window.width() < Self::NARROW_WIDTH;
         self.narrow.set(now);
+        if was != now {
+            // Width class feeds `look.message.layout = auto` (the compact time
+            // format engages on phone-sized windows), so crossing the
+            // threshold re-derives the settings snapshot.
+            self.apply_display_settings();
+        }
 
         if !now {
             if was {
@@ -1479,13 +1574,65 @@ impl ChatWindow {
         // labels are plain widgets, not retintable tags — rebuild them.
         self.rebuild_member_list();
         let is_popout = self.pinned.is_some();
-        let fmt = self
+        let get_str = |key: &str, dflt: &str| {
+            self.app.setting(key).as_str().map(str::to_string).unwrap_or_else(|| dflt.to_string())
+        };
+        let get_bool = |key: &str, dflt: bool| self.app.setting(key).as_bool().unwrap_or(dflt);
+        let get_int = |key: &str, dflt: i64| self.app.setting(key).as_i64().unwrap_or(dflt);
+
+        // `look.message.layout`: compact swaps in the compact time format.
+        // "auto" means compact on a phone-sized window, standard otherwise.
+        let layout = get_str("look.message.layout", "auto");
+        let compact = layout == "compact" || (layout == "auto" && self.narrow.get());
+        let fmt_key =
+            if compact { "look.buffer.time_format_compact" } else { "look.buffer.time_format" };
+        let fmt = format::time_format_to_strftime(&get_str(
+            fmt_key,
+            if compact { "HH:mm" } else { "HH:mm:ss" },
+        ));
+        *self.time_fmt.borrow_mut() = fmt.clone();
+
+        *self.render_opts.borrow_mut() = format::RenderOpts {
+            strftime: fmt,
+            palette_len: self.palette_len.get(),
+            stop_chars: get_str("look.nick.color_stop_chars", "_|"),
+            show_event_host: get_bool("chat.show_event_host", false),
+            show_join_account: get_bool("chat.show_join_account", false),
+        };
+        self.collapse_authors.set(get_bool("look.message.collapse_authors", false));
+        self.collapse_window_secs
+            .set(get_int("look.message.collapse_authors_window", 5).max(0) * 60);
+        self.collapse_timestamps.set(get_bool("look.message.collapse_timestamps", true));
+        self.show_mode_prefix.set(get_bool("look.nick.show_mode_prefix", false));
+        self.keep_position_on_send.set(get_bool("chat.keep_position_on_send", false));
+        *self.unread_display.borrow_mut() = get_str("look.buffer_list.unread_display", "full");
+        self.unread_bold.set(get_bool("look.buffer_list.unread_bold", false));
+        self.lag_min_show_ms.set(get_int("look.bar.lag_min_show_ms", 500));
+        self.lag_alarm_ms.set(get_int("look.bar.lag_alarm_ms", 2000));
+        self.lag_always_show.set(get_bool("look.bar.lag_always_show", false));
+        *self.bar_time_fmt.borrow_mut() = self
             .app
-            .setting("look.buffer.time_format")
+            .setting("look.bar.time_format")
             .as_str()
             .map(format::time_format_to_strftime)
             .unwrap_or_else(|| "%H:%M:%S".to_string());
-        *self.time_fmt.borrow_mut() = fmt;
+        // mIRC palette overrides: only well-formed hex entries take effect —
+        // the web default carries CSS var() strings GTK cannot resolve, and
+        // those fall back to the built-in table per-slot.
+        *self.mirc_palette.borrow_mut() = self
+            .app
+            .setting("look.color.mirc_colors")
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|v| {
+                        v.as_str()
+                            .filter(|c| c.starts_with('#') && (c.len() == 7 || c.len() == 4))
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // The hanging indent is measured from the timestamp column, so a
         // format change moves it. Without this, switching to a wider format
         // leaves wrapped lines hanging under the old column.
@@ -2035,16 +2182,37 @@ impl ChatWindow {
 
                 let (unread, highlights) =
                     buf.map(|b| (b.unread, b.highlights)).unwrap_or((0, 0));
-                if highlights > 0 {
+                // `look.buffer_list.unread_display` — how loud the badges are:
+                //   full        count, highlights taking precedence (default)
+                //   highlights  only highlight counts; the noisy total hidden
+                //   badge       a bare dot, no numbers
+                //   off         nothing at all
+                let display = self.unread_display.borrow().clone();
+                let badge_spec: Option<(String, bool)> = match display.as_str() {
+                    "off" => None,
+                    "badge" => (unread > 0 || highlights > 0)
+                        .then(|| ("\u{25CF}".to_string(), highlights > 0)),
+                    "highlights" => {
+                        (highlights > 0).then(|| (highlights.to_string(), true))
+                    }
+                    _ => {
+                        if highlights > 0 {
+                            Some((highlights.to_string(), true))
+                        } else if unread > 0 {
+                            Some((unread.to_string(), false))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some((text, hi)) = badge_spec {
                     let badge = gtk::Label::builder()
-                        .label(highlights.to_string())
-                        .css_classes(["badge", "badge-highlight"])
-                        .build();
-                    row_box.append(&badge);
-                } else if unread > 0 {
-                    let badge = gtk::Label::builder()
-                        .label(unread.to_string())
-                        .css_classes(["badge"])
+                        .label(text)
+                        .css_classes(if hi {
+                            vec!["badge", "badge-highlight"]
+                        } else {
+                            vec!["badge"]
+                        })
                         .build();
                     row_box.append(&badge);
                 }
@@ -2115,6 +2283,11 @@ impl ChatWindow {
                 }
                 if unread > 0 || highlights > 0 {
                     row.add_css_class("has-unread");
+                    // `look.buffer_list.unread_bold`: weight on top of the
+                    // colour, for those who want the louder cue.
+                    if self.unread_bold.get() {
+                        row.add_css_class("unread-bold");
+                    }
                 }
                 self.buffer_list.append(&row);
 
@@ -2224,12 +2397,14 @@ impl ChatWindow {
     fn render_active(&self) {
         let Some(key) = self.active.borrow().clone() else {
             self.clear_embeds();
+            *self.prev_row.borrow_mut() = None;
             self.text.set_text("");
             return;
         };
         let store = self.app.store.borrow();
         let Some(buf) = store.buffer(&key) else {
             self.clear_embeds();
+            *self.prev_row.borrow_mut() = None;
             self.text.set_text("");
             return;
         };
@@ -2314,12 +2489,13 @@ impl ChatWindow {
             prev.len
         } else {
             self.clear_embeds();
+            *self.prev_row.borrow_mut() = None;
             self.text.set_text("");
             0
         };
 
         let strftime = self.time_fmt.borrow().clone();
-        let palette_len = self.palette_len.get();
+        let opts = self.render_opts.borrow().clone();
         let divider_after = self.divider_after.get();
         let mut divider_drawn = start_index > 0; // never re-draw mid-append
         for row in rows.iter().skip(start_index) {
@@ -2335,7 +2511,7 @@ impl ChatWindow {
             }
             match row {
                 Row::Event(e) => {
-                    if let Some(line) = format::line_for(e, &strftime, palette_len) {
+                    if let Some(line) = format::line_for(e, &opts) {
                         self.append_line(&line);
                     }
                     if e.event_type.is_chat() {
@@ -2444,12 +2620,21 @@ impl ChatWindow {
             self.ensure_tag("m-strike", |b| b.strikethrough(true).build());
             names.push("m-strike".to_string());
         }
-        if let Some(fg) = style.fg_color() {
+        // `look.color.mirc_colors`: a user override for the 16 basic slots
+        // takes precedence over the built-in table; hex escapes and slots the
+        // user left as CSS vars fall through to the default resolution.
+        let user_slot = |idx: Option<u8>| -> Option<String> {
+            let i = idx? as usize;
+            self.mirc_palette.borrow().get(i).cloned().flatten()
+        };
+        let (fg_idx, bg_idx) =
+            if style.reverse { (style.bg, style.fg) } else { (style.fg, style.bg) };
+        if let Some(fg) = user_slot(fg_idx).or_else(|| style.fg_color()) {
             let name = format!("mfg{fg}");
             self.ensure_tag(&name, |b| b.foreground(&fg).build());
             names.push(name);
         }
-        if let Some(bg) = style.bg_color() {
+        if let Some(bg) = user_slot(bg_idx).or_else(|| style.bg_color()) {
             let name = format!("mbg{bg}");
             self.ensure_tag(&name, |b| b.background(&bg).build());
             names.push(name);
@@ -2527,20 +2712,73 @@ impl ChatWindow {
         let row_start = self.text.end_iter().offset();
         let _ = row_start;
 
-        // Classic IRC rows: `time nick: message`, every line, no grouping.
-        // The grouped layout (nick once as a heading, messages indented under
-        // it) kept mis-attributing lines — the third line of a run reads as
-        // anonymous unless you've already learned the nick colours — and the
-        // user asked for the traditional form outright. Repeating the nick
-        // costs a little width and buys unambiguous authorship on every row.
-        self.insert_time(line);
+        // Classic IRC rows: `time nick: message`, every line. Grouping exists
+        // only as the server-synced settings the web client honours —
+        // `look.message.collapse_timestamps` blanks a repeated identical
+        // stamp, `look.message.collapse_authors` blanks a repeated author
+        // within its window. Both default to what the user asked for here
+        // (timestamps on, author collapse off), and both follow the website.
+        let prev = self.prev_row.borrow().clone();
+        let stamp = line.time.trim().to_string();
+        let hide_stamp = self.collapse_timestamps.get()
+            && !stamp.is_empty()
+            && prev.as_ref().is_some_and(|p| p.stamp == stamp);
+        if hide_stamp {
+            let width = format::time_width(&self.time_fmt.borrow());
+            if width > 0 {
+                self.insert_with_tags(&" ".repeat(width + 1), &["time"]);
+            }
+        } else {
+            self.insert_time(line);
+        }
         match &line.author {
             Some(author) => {
-                self.insert_with_tags(
-                    author,
-                    &[line.nick_tag.as_deref().unwrap_or("nick-plain"), "author"],
-                );
-                self.insert_with_tags(": ", &["time"]);
+                // Only plain messages collapse; a highlight names its target
+                // and must never read as anonymous. Window 0 means "same
+                // rendered stamp only", larger values bridge pauses.
+                let window = self.collapse_window_secs.get();
+                let same_author = prev
+                    .as_ref()
+                    .is_some_and(|p| p.author.as_deref() == Some(author.as_str()));
+                let within = if window == 0 {
+                    prev.as_ref().is_some_and(|p| p.stamp == stamp)
+                } else {
+                    match (prev.as_ref().and_then(|p| p.unix), line.unix) {
+                        (Some(a), Some(b)) => (b - a).abs() <= window,
+                        _ => false,
+                    }
+                };
+                let collapse = self.collapse_authors.get()
+                    && same_author
+                    && within
+                    && line.kind != format::LineKind::Highlight;
+                if collapse {
+                    // The author column is blanked, not removed — the message
+                    // text stays in its column.
+                    let pad = author.chars().count() + 2;
+                    self.insert_with_tags(&" ".repeat(pad), &["time"]);
+                } else {
+                    // `look.nick.show_mode_prefix`: the speaker's current
+                    // channel rank (@/%/+…) before their nick, from the live
+                    // member list — absent for someone who has since left.
+                    if self.show_mode_prefix.get() {
+                        if let Some(sigil) = self.active.borrow().as_ref().and_then(|k| {
+                            let store = self.app.store.borrow();
+                            let sig = store
+                                .buffer(k)
+                                .and_then(|b| b.members.get(&lurker_proto::fold(author)))
+                                .and_then(|m| m.sigil());
+                            sig
+                        }) {
+                            self.insert_with_tags(&sigil.to_string(), &["time"]);
+                        }
+                    }
+                    self.insert_with_tags(
+                        author,
+                        &[line.nick_tag.as_deref().unwrap_or("nick-plain"), "author"],
+                    );
+                    self.insert_with_tags(": ", &["time"]);
+                }
             }
             None => {
                 // Presence, modes, server text: the marker column (-->, <--,
@@ -2552,6 +2790,8 @@ impl ChatWindow {
                 self.insert_with_tags(" ", &["time"]);
             }
         }
+        *self.prev_row.borrow_mut() =
+            Some(PrevRow { author: line.author.clone(), unix: line.unix, stamp });
 
         // The message body carries IRC formatting codes inline. Parsing splits
         // it into styled runs and drops the control characters, which is what
@@ -3851,7 +4091,11 @@ impl ChatWindow {
                 let colour = if my_nick.as_deref() == Some(lurker_proto::fold(&m.nick).as_str()) {
                     self_colour.clone()
                 } else {
-                    let idx = crate::format::nick_color_index(&m.nick, palette.len());
+                    let idx = crate::format::nick_color_index(
+                        &m.nick,
+                        palette.len(),
+                        &self.render_opts.borrow().stop_chars,
+                    );
                     palette.get(idx).cloned().unwrap_or_else(|| "#939293".to_string())
                 };
                 label.set_markup(&format!(
@@ -3916,9 +4160,38 @@ impl ChatWindow {
         let highlights = store.total_highlights();
         let badge = if highlights > 0 { format!("  ✱{highlights}") } else { String::new() };
 
+        // `look.bar.*`: the lag readout appears at min_show, turns alarming at
+        // the alarm threshold, and can be pinned on permanently.
+        let lag = key
+            .as_ref()
+            .and_then(|k| k.network_id)
+            .and_then(|id| store.networks.get(&id))
+            .and_then(|n| n.lag_ms);
+        let lag_part = match lag {
+            Some(ms) if ms >= self.lag_min_show_ms.get().max(0) || self.lag_always_show.get() => {
+                let level = if ms >= self.lag_alarm_ms.get().max(0) { " (!)" } else { "" };
+                format!("  │  lag {ms}ms{level}")
+            }
+            _ => String::new(),
+        };
+
+        // `look.bar.time_format`: the status-bar clock; empty hides it.
+        let clock = {
+            let fmt = self.bar_time_fmt.borrow();
+            if fmt.is_empty() {
+                String::new()
+            } else {
+                glib::DateTime::now_local()
+                    .ok()
+                    .and_then(|d| d.format(&fmt).ok())
+                    .map(|t| format!("  │  {t}"))
+                    .unwrap_or_default()
+            }
+        };
+
         self.status_label
             .set_text(&format!(
-                "{nick}  │  {where_}  │  {conn}{badge}{typing}{jumped}{paused}"
+                "{nick}  │  {where_}  │  {conn}{badge}{lag_part}{typing}{jumped}{paused}{clock}"
             ));
     }
 

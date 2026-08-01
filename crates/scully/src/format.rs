@@ -73,6 +73,10 @@ pub struct Line {
     /// Kept separate from `nick` because that field is the row's left-column
     /// marker (`-->`, `--`, `*`), which is not the same thing as authorship.
     pub author: Option<String>,
+    /// The event's moment as unix seconds, for the author-collapse window
+    /// (`look.message.collapse_authors_window`). `None` when the event carried
+    /// no parseable time — such rows never collapse.
+    pub unix: Option<i64>,
 }
 
 /// Fallback nick palette, used until `look.nick.colors` loads (and when it is
@@ -84,14 +88,44 @@ pub const DEFAULT_NICK_PALETTE: [&str; 12] = [
     "#ff9cac", "#7fdbca", "#b2ccd6", "#e59aff", "#f07178", "#a1c4fd",
 ];
 
-pub fn nick_color_index(nick: &str, palette_len: usize) -> usize {
-    // djb2 over the *folded* nick, so `Alice` and `alice` — the same person —
-    // never get two different colours.
-    let h = nick
-        .to_ascii_lowercase()
-        .bytes()
-        .fold(5381u64, |h, b| h.wrapping_mul(33).wrapping_add(b as u64));
-    (h % palette_len.max(1) as u64) as usize
+/// Trim trailing separator characters before hashing, weechat-style: `alice_`
+/// and `alice__` are the same person as `alice`, so they share a colour.
+/// Leading stop chars are kept (a nick like `_alice` is just `_alice`); the
+/// trim starts at the first stop char that FOLLOWS a real character.
+fn trim_for_color<'a>(nick: &'a str, stop_chars: &str) -> &'a str {
+    let mut seen_other = false;
+    for (i, ch) in nick.char_indices() {
+        let is_stop = stop_chars.contains(ch);
+        if is_stop && seen_other {
+            return &nick[..i];
+        }
+        if !is_stop {
+            seen_other = true;
+        }
+    }
+    nick
+}
+
+/// Map a nick to a palette slot — **identically to the web client**
+/// (`vue_client/src/utils/nickColor.ts`), so the same person is the same
+/// colour whichever client you're looking at.
+///
+/// That parity is the whole design constraint here, and it is why this is NOT
+/// textbook djb2: the web implements weechat's variant
+/// (`h ^= (h<<5) + (h>>2) + codepoint`, 32-bit), over the stop-char-trimmed,
+/// lowercased nick, by Unicode code point rather than byte. Any deviation —
+/// 64-bit arithmetic, plain `h*33+c`, hashing bytes — produces different slots
+/// for some nicks and quietly breaks cross-client agreement.
+pub fn nick_color_index(nick: &str, palette_len: usize, stop_chars: &str) -> usize {
+    let normalized = trim_for_color(nick, stop_chars).to_lowercase();
+    let mut h: u32 = 5381;
+    for ch in normalized.chars() {
+        let term = (h << 5)
+            .wrapping_add(h >> 2)
+            .wrapping_add(ch as u32);
+        h ^= term;
+    }
+    (h % palette_len.max(1) as u32) as usize
 }
 
 /// Translate the registry's moment.js-style time format (`HH:mm:ss`) to the
@@ -202,18 +236,55 @@ pub fn summary_line(summary: &lurker_proto::consolidate::Summary, strftime: &str
         nick_tag: Some("nick-plain".to_string()),
         text: summary.render(),
         kind: LineKind::NickChange,
+        unix: None,
+    }
+}
+
+/// Everything the renderer needs from settings, gathered once per redraw so
+/// per-line rendering never re-reads the settings store.
+#[derive(Clone, Debug)]
+pub struct RenderOpts {
+    /// `look.buffer.time_format` (or the compact variant), as strftime.
+    pub strftime: String,
+    /// Length of `look.nick.colors`.
+    pub palette_len: usize,
+    /// `look.nick.color_stop_chars`.
+    pub stop_chars: String,
+    /// `chat.show_event_host`: user@host on join/part/quit/nick lines.
+    pub show_event_host: bool,
+    /// `chat.show_join_account`: services account on join lines.
+    pub show_join_account: bool,
+}
+
+impl Default for RenderOpts {
+    fn default() -> Self {
+        Self {
+            strftime: "%H:%M:%S".into(),
+            palette_len: DEFAULT_NICK_PALETTE.len(),
+            stop_chars: "_|".into(),
+            show_event_host: false,
+            show_join_account: false,
+        }
     }
 }
 
 /// Render an event, or `None` if it draws nothing.
-///
-/// `strftime` is the timestamp format (from `look.buffer.time_format`);
-/// `palette_len` sizes the deterministic nick-colour hash to the user's
-/// palette (`look.nick.colors`).
-pub fn line_for(event: &MessageEvent, strftime: &str, palette_len: usize) -> Option<Line> {
+pub fn line_for(event: &MessageEvent, opts: &RenderOpts) -> Option<Line> {
+    let strftime = opts.strftime.as_str();
+    let palette_len = opts.palette_len;
     let time = format_time(event.time.as_deref(), strftime);
     let nick = event.nick.clone().unwrap_or_default();
     let text = event.text.clone().unwrap_or_default();
+
+    // `chat.show_event_host`: the affected user's user@host beside their nick
+    // on presence lines — ops reading for ban masks. The web renders
+    // `alice (~alice@host) joined`; match it.
+    let with_host = |nick: &str| -> String {
+        match (&event.userhost, opts.show_event_host) {
+            (Some(uh), true) if !uh.is_empty() => format!("{nick} ({uh})"),
+            _ => nick.to_string(),
+        }
+    };
 
     let (nick_col, body, kind, colored) = match event.event_type {
         EventType::Message => {
@@ -235,20 +306,34 @@ pub fn line_for(event: &MessageEvent, strftime: &str, palette_len: usize) -> Opt
             (pad_nick(&format!("-{nick}-")), text, LineKind::Notice, false)
         }
         EventType::Join => {
-            (pad_nick("-->"), format!("{nick} joined"), LineKind::Join, false)
+            // `chat.show_join_account`: `alice [acct] joined`, matching the
+            // web client — ops confirming who is identified.
+            let mut who = with_host(&nick);
+            if opts.show_join_account {
+                if let Some(acct) = event.account.as_deref().filter(|a| !a.is_empty()) {
+                    who = format!("{who} [{acct}]");
+                }
+            }
+            (pad_nick("-->"), format!("{who} joined"), LineKind::Join, false)
         }
-        EventType::Part => (
-            pad_nick("<--"),
-            if text.is_empty() { format!("{nick} left") } else { format!("{nick} left ({text})") },
-            LineKind::Leave,
-            false,
-        ),
-        EventType::Quit => (
-            pad_nick("<--"),
-            if text.is_empty() { format!("{nick} quit") } else { format!("{nick} quit ({text})") },
-            LineKind::Leave,
-            false,
-        ),
+        EventType::Part => {
+            let who = with_host(&nick);
+            (
+                pad_nick("<--"),
+                if text.is_empty() { format!("{who} left") } else { format!("{who} left ({text})") },
+                LineKind::Leave,
+                false,
+            )
+        }
+        EventType::Quit => {
+            let who = with_host(&nick);
+            (
+                pad_nick("<--"),
+                if text.is_empty() { format!("{who} quit") } else { format!("{who} quit ({text})") },
+                LineKind::Leave,
+                false,
+            )
+        }
         EventType::Kick => {
             let who = event.kicked.clone().unwrap_or_default();
             (
@@ -264,7 +349,12 @@ pub fn line_for(event: &MessageEvent, strftime: &str, palette_len: usize) -> Opt
         }
         EventType::Nick => {
             let new = event.new_nick.clone().unwrap_or_default();
-            (pad_nick("--"), format!("{nick} is now known as {new}"), LineKind::NickChange, false)
+            (
+                pad_nick("--"),
+                format!("{} is now known as {new}", with_host(&nick)),
+                LineKind::NickChange,
+                false,
+            )
         }
         EventType::Chghost => {
             let ident = event.new_ident.clone().unwrap_or_default();
@@ -301,6 +391,11 @@ pub fn line_for(event: &MessageEvent, strftime: &str, palette_len: usize) -> Opt
     };
 
     Some(Line {
+        unix: event
+            .time
+            .as_deref()
+            .and_then(|raw| glib::DateTime::from_iso8601(raw, None).ok())
+            .map(|d| d.to_unix()),
         author: match event.event_type {
             EventType::Message | EventType::Action => event.nick.clone(),
             _ => None,
@@ -312,7 +407,7 @@ pub fn line_for(event: &MessageEvent, strftime: &str, palette_len: usize) -> Opt
                 if event.is_self {
                     "nick-self".to_string()
                 } else {
-                    format!("nick-{}", nick_color_index(&nick, palette_len))
+                    format!("nick-{}", nick_color_index(&nick, palette_len, &opts.stop_chars))
                 }
             })
             .or(Some("nick-plain".to_string())),
@@ -334,11 +429,51 @@ mod tests {
         // The same human must not get two colours because a server echoed
         // their nick with different casing.
         let n = DEFAULT_NICK_PALETTE.len();
-        assert_eq!(nick_color_index("Alice", n), nick_color_index("alice", n));
-        assert_eq!(nick_color_index("ALICE", n), nick_color_index("alice", n));
-        assert!(nick_color_index("alice", n) < n);
+        assert_eq!(nick_color_index("Alice", n, "_|"), nick_color_index("alice", n, "_|"));
+        assert_eq!(nick_color_index("ALICE", n, "_|"), nick_color_index("alice", n, "_|"));
+        assert!(nick_color_index("alice", n, "_|") < n);
         // A degenerate palette must not divide by zero.
-        assert_eq!(nick_color_index("alice", 0), 0);
+        assert_eq!(nick_color_index("alice", 0, "_|"), 0);
+    }
+
+    #[test]
+    fn nick_colour_matches_the_web_client_exactly() {
+        // Reference values computed by running the web client's own
+        // trimForColor + djb2 (vue_client/src/utils/nickColor.ts) in Node.
+        // These are the whole point: the same person must be the same colour
+        // whichever client you're looking at, so any change here that breaks
+        // one of these breaks cross-client agreement, however reasonable it
+        // looks locally.
+        for (nick, index) in [
+            ("amiantos", 7),
+            ("Milambar", 10),
+            ("kaitphone", 8),
+            ("alice", 2),
+            ("jawsh", 8),
+            ("Guest22618", 2),
+        ] {
+            assert_eq!(nick_color_index(nick, 12, "_|"), index, "{nick}");
+        }
+    }
+
+    #[test]
+    fn stop_chars_trim_trailing_separators_but_keep_leading_ones() {
+        // weechat semantics, via the web client: `alice__` is alice come back
+        // from a netsplit, but `_alice` is just someone called `_alice`.
+        let n = 12;
+        assert_eq!(nick_color_index("alice__", n, "_|"), nick_color_index("alice", n, "_|"));
+        assert_eq!(nick_color_index("alice|away", n, "_|"), nick_color_index("alice", n, "_|"));
+        assert_eq!(nick_color_index("_alice", n, "_|"), 3, "web reference value");
+        assert_ne!(
+            nick_color_index("_alice", n, "_|"),
+            nick_color_index("alice", n, "_|"),
+            "a leading underscore is part of the name, not a separator"
+        );
+        // No stop chars configured: nothing is trimmed.
+        assert_ne!(
+            nick_color_index("alice__", n, ""),
+            nick_color_index("alice", n, "")
+        );
     }
 
     #[test]
@@ -418,7 +553,7 @@ mod tests {
         e.text = Some("ping".into());
         e.matched = true;
         e.notify = false;
-        assert_eq!(line_for(&e, "%H:%M:%S", 12).unwrap().kind, LineKind::Highlight);
+        assert_eq!(line_for(&e, &RenderOpts::default()).unwrap().kind, LineKind::Highlight);
     }
 
     #[test]
@@ -431,7 +566,7 @@ mod tests {
             EventType::ChannelJoined,
             EventType::State,
         ] {
-            assert!(line_for(&ev(t.clone()), "%H:%M:%S", 12).is_none(), "{t:?} should not render");
+            assert!(line_for(&ev(t.clone()), &RenderOpts::default()).is_none(), "{t:?} should not render");
         }
     }
 
@@ -439,12 +574,50 @@ mod tests {
     fn presence_events_render_with_direction_markers() {
         let mut join = ev(EventType::Join);
         join.time = None;
-        let line = line_for(&join, "%H:%M:%S", DEFAULT_NICK_PALETTE.len()).unwrap();
+        let line = line_for(&join, &RenderOpts::default()).unwrap();
         assert!(line.nick.trim() == "-->");
         assert_eq!(line.text, "alice joined");
 
         let mut quit = ev(EventType::Quit);
         quit.text = Some("Ping timeout".into());
-        assert_eq!(line_for(&quit, "%H:%M:%S", 12).unwrap().text, "alice quit (Ping timeout)");
+        assert_eq!(line_for(&quit, &RenderOpts::default()).unwrap().text, "alice quit (Ping timeout)");
+    }
+
+    #[test]
+    fn event_host_and_join_account_follow_their_settings() {
+        // chat.show_event_host / chat.show_join_account, matching the web's
+        // rendering: `alice (~a@host) [acct] joined`. Off by default; a join
+        // that carries the data must not leak it unless asked.
+        let mut join = ev(EventType::Join);
+        join.userhost = Some("~a@host.example.net".into());
+        join.account = Some("aliceacct".into());
+
+        assert_eq!(line_for(&join, &RenderOpts::default()).unwrap().text, "alice joined");
+
+        let host_only = RenderOpts { show_event_host: true, ..RenderOpts::default() };
+        assert_eq!(
+            line_for(&join, &host_only).unwrap().text,
+            "alice (~a@host.example.net) joined"
+        );
+
+        let both = RenderOpts {
+            show_event_host: true,
+            show_join_account: true,
+            ..RenderOpts::default()
+        };
+        assert_eq!(
+            line_for(&join, &both).unwrap().text,
+            "alice (~a@host.example.net) [aliceacct] joined"
+        );
+
+        // Quit lines take the host but never the account — accounts are a
+        // join-line detail (the extended-join cap), matching the web.
+        let mut quit = ev(EventType::Quit);
+        quit.userhost = Some("~a@host.example.net".into());
+        quit.account = Some("aliceacct".into());
+        assert_eq!(
+            line_for(&quit, &both).unwrap().text,
+            "alice (~a@host.example.net) quit"
+        );
     }
 }
