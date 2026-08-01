@@ -620,3 +620,12 @@ button.embed-poster {
 button.embed-poster:hover {
   border-color: @accent;
 }
+
+/* Per-friend presence dot (#7): green reachable, amber away, red offline,
+   hollow unknown. The row label alone can't carry this — every sidebar label
+   is muted by default, so "gray" reads as offline even when it isn't. */
+.friend-dot { font-size: 10pt; }
+.friend-dot.online  { color: @good; }
+.friend-dot.away    { color: @warn; }
+.friend-dot.offline { color: @bad; }
+.friend-dot.unknown { color: @fg_muted; }

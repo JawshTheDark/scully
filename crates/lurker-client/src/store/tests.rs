@@ -979,3 +979,37 @@ fn a_watched_friend_coming_online_emits_the_notify_event() {
     let out = apply(&mut store, ev);
     assert!(!out.iter().any(|e| matches!(e, StoreEvent::FriendCameOnline(_))));
 }
+
+#[test]
+fn snapshot_peer_presence_hydrates_friend_state() {
+    // The connect burst path (#7 was reported as "all friends grayed"): the
+    // snapshot's peerPresence map must land in the same store the live
+    // events feed, keyed by folded nick, and read back as the contact's
+    // presence.
+    let mut store = Store::new();
+    apply(
+        &mut store,
+        json!({ "kind": "snapshot", "networks": [
+            { "networkId": 1, "state": "connected", "nick": "me",
+              "peerPresence": {
+                  "amiantos": { "nick": "Amiantos", "state": "online" },
+                  "sleepy":   { "nick": "sleepy", "state": "away" },
+                  "gone":     { "nick": "gone", "state": "offline" }
+              } }
+        ]}),
+    );
+    apply(
+        &mut store,
+        contacts_snapshot(json!([
+            { "id": 1, "displayName": "amiantos",
+              "targets": [{ "networkId": 1, "nick": "AmIaNtOs", "isPrimary": true }] },
+            { "id": 2, "displayName": "sleepy",
+              "targets": [{ "networkId": 1, "nick": "sleepy", "isPrimary": true }] },
+            { "id": 3, "displayName": "gone",
+              "targets": [{ "networkId": 1, "nick": "gone", "isPrimary": true }] }
+        ])),
+    );
+    assert_eq!(store.contact_presence(store.contact(1).unwrap()), Presence::Online);
+    assert_eq!(store.contact_presence(store.contact(2).unwrap()), Presence::Away);
+    assert_eq!(store.contact_presence(store.contact(3).unwrap()), Presence::Offline);
+}

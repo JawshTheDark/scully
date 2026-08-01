@@ -56,6 +56,9 @@ pub fn entries(cx: &BufContext) -> Vec<Entry> {
         });
         v.push(item("close", "Close"));
     } else if cx.is_dm {
+        // A DM row IS a person (#6): whois belongs here, where the channel
+        // rows have no single person to ask about.
+        v.push(item("whois", "Whois"));
         v.push(Entry::Separator);
         v.push(item("close", "Close"));
     }
@@ -65,7 +68,7 @@ pub fn entries(cx: &BufContext) -> Vec<Entry> {
 /// Whether an id is one this menu can emit — the dispatch side asserts on this
 /// so a renamed id can't silently become a dead click.
 pub fn id_is_known(id: &str) -> bool {
-    matches!(id, "popout" | "read" | "pin" | "unpin" | "part" | "join" | "close")
+    matches!(id, "popout" | "read" | "pin" | "unpin" | "part" | "join" | "close" | "whois")
 }
 
 /// Build the gio menu model for `cx`. Separators split items into sections.

@@ -912,6 +912,60 @@ impl ChatWindow {
         });
         self.text_view.add_controller(clicks);
 
+        // Right-click (and long-press, for touch) in a DM conversation opens
+        // the peer's menu — whois, CTCP, add-to-friends (#6). A DM has no
+        // nicklist, so this is its only route to those actions. Channels keep
+        // their nicklist for it; the gesture stays inert there.
+        let this = self.clone();
+        let peer_click = gtk::GestureClick::builder().button(3).build();
+        peer_click.connect_pressed(move |gesture, _, x, y| {
+            let Some(key) = this.active.borrow().clone() else { return };
+            if !key.is_dm() {
+                return;
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let peer = this
+                .app
+                .store
+                .borrow()
+                .buffer(&key)
+                .map(|b| b.display_name.clone())
+                .unwrap_or_else(|| key.target.clone());
+            *this.menu_nick.borrow_mut() = peer.clone();
+            let (px, py) = this
+                .text_view
+                .compute_point(&this.centre_pane, &gtk::graphene::Point::new(x as f32, y as f32))
+                .map(|p| (p.x() as i32, p.y() as i32))
+                .unwrap_or((x as i32, y as i32));
+            this.open_peer_menu(&peer, px, py);
+        });
+        self.text_view.add_controller(peer_click);
+
+        let this = self.clone();
+        let peer_hold = gtk::GestureLongPress::new();
+        peer_hold.connect_pressed(move |gesture, x, y| {
+            let Some(key) = this.active.borrow().clone() else { return };
+            if !key.is_dm() {
+                return;
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let peer = this
+                .app
+                .store
+                .borrow()
+                .buffer(&key)
+                .map(|b| b.display_name.clone())
+                .unwrap_or_else(|| key.target.clone());
+            *this.menu_nick.borrow_mut() = peer.clone();
+            let (px, py) = this
+                .text_view
+                .compute_point(&this.centre_pane, &gtk::graphene::Point::new(x as f32, y as f32))
+                .map(|p| (p.x() as i32, p.y() as i32))
+                .unwrap_or((x as i32, y as i32));
+            this.open_peer_menu(&peer, px, py);
+        });
+        self.text_view.add_controller(peer_hold);
+
         // Pointer cursor over links.
         let this = self.clone();
         let motion = gtk::EventControllerMotion::new();
@@ -1700,6 +1754,9 @@ impl ChatWindow {
         if let Some(tag) = self.text.tag_table().lookup("row-alt") {
             self.text.tag_table().remove(&tag);
         }
+        if let Some(tag) = self.text.tag_table().lookup("row-highlight") {
+            self.text.tag_table().remove(&tag);
+        }
         // The nicklist derives its colours from the same palette, but its
         // labels are plain widgets, not retintable tags — rebuild them.
         self.rebuild_member_list();
@@ -2290,6 +2347,25 @@ impl ChatWindow {
                 };
 
                 let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                // Friend rows carry their own presence dot (#7): every sidebar
+                // label is muted by default, so without one an online friend
+                // and an offline friend read identically "gray". Green
+                // reachable, amber away, red offline, hollow unknown (a live
+                // network that offers no MONITOR).
+                if let Some(p) = entry.presence {
+                    let (glyph, class) = match p {
+                        lurker_client::Presence::Online => ("\u{25CF}", "online"),
+                        lurker_client::Presence::Away => ("\u{25CF}", "away"),
+                        lurker_client::Presence::Offline => ("\u{25CF}", "offline"),
+                        lurker_client::Presence::Unknown => ("\u{25CB}", "unknown"),
+                    };
+                    row_box.append(
+                        &gtk::Label::builder()
+                            .label(glyph)
+                            .css_classes(["friend-dot", class])
+                            .build(),
+                    );
+                }
                 let name = gtk::Label::builder()
                     .xalign(0.0)
                     .label(&display)
@@ -3055,6 +3131,19 @@ impl ChatWindow {
             }
         }
 
+        // A highlight paints its WHOLE line, Spooky-style (#8): a dark-gold
+        // wash makes mentions findable while scrolling, where a coloured text
+        // run alone disappears into the noise. Derived from the warn colour
+        // at low alpha so a custom palette recolours it too.
+        if line.kind == format::LineKind::Highlight {
+            if let Some(tag) = self.highlight_row_tag() {
+                let end = self.text.end_iter();
+                let mut start = end;
+                start.set_line_offset(0);
+                self.text.apply_tag(&tag, &start, &end);
+            }
+        }
+
         // The message body carries IRC formatting codes inline. Parsing splits
         // it into styled runs and drops the control characters, which is what
         // stops a colour chart rendering as a row of `▯` boxes.
@@ -3107,6 +3196,31 @@ impl ChatWindow {
         };
         table.add(&tag);
         tag.set_priority(0);
+        Some(tag)
+    }
+
+    /// The whole-line wash behind a highlight row. Warn colour at low alpha,
+    /// so `look.color.warn` recolours it; dropped on settings changes like
+    /// row-alt so edits take effect on the next redraw.
+    fn highlight_row_tag(&self) -> Option<gtk::TextTag> {
+        let table = self.text.tag_table();
+        if let Some(tag) = table.lookup("row-highlight") {
+            return Some(tag);
+        }
+        let warn = self
+            .app
+            .setting("look.color.warn")
+            .as_str()
+            .filter(|c| c.starts_with('#'))
+            .unwrap_or("#f9d978")
+            .to_string();
+        let mut rgba = gtk::gdk::RGBA::parse(&warn).ok()?;
+        rgba.set_alpha(0.16);
+        let tag = gtk::TextTag::builder().name("row-highlight").build();
+        tag.set_paragraph_background_rgba(Some(&rgba));
+        table.add(&tag);
+        // Above row-alt (priority 0), below every explicit style.
+        tag.set_priority(1.min(table.size() - 1));
         Some(tag)
     }
 
@@ -3367,6 +3481,17 @@ impl ChatWindow {
     /// which is what stops actions rendering greyed-out and dead, the symptom
     /// of an action group the menu could not see.
     fn open_nick_menu(self: &Rc<Self>, nick: &str, x: i32, y: i32) {
+        self.open_nick_menu_impl(nick, x, y, false)
+    }
+
+    /// The same menu, anchored in the conversation pane — how a DM offers
+    /// whois/CTCP/friend actions for its peer (#6), since it has no nicklist
+    /// to right-click.
+    fn open_peer_menu(self: &Rc<Self>, nick: &str, x: i32, y: i32) {
+        self.open_nick_menu_impl(nick, x, y, true)
+    }
+
+    fn open_nick_menu_impl(self: &Rc<Self>, nick: &str, x: i32, y: i32, in_conversation: bool) {
         // Dismiss any lingering menu.
         if let Some(old) = self.nick_menu.borrow_mut().take() {
             old.unparent();
@@ -3425,16 +3550,23 @@ impl ChatWindow {
 
         let popover = gtk::PopoverMenu::from_model(Some(&model));
         popover.insert_action_group("nick", Some(&group));
-        // Parented to the PANE, not the list. A popover anchored inside a
+        // Parented to a PANE, never a list. A popover anchored inside a
         // ScrolledWindow is constrained to the scrolled viewport, so GTK gives
-        // it its own scrollbar — a five-item menu that scrolls. The pane does
-        // not scroll, so the menu is free to be its natural height.
-        let (px, py) = self
-            .member_list
-            .compute_point(&self.member_pane, &gtk::graphene::Point::new(x as f32, y as f32))
-            .map(|p| (p.x() as i32, p.y() as i32))
-            .unwrap_or((x, y));
-        popover.set_parent(&self.member_pane);
+        // it its own scrollbar — a five-item menu that scrolls. Panes do not
+        // scroll, so the menu is free to be its natural height. In a DM the
+        // member pane is hidden (a hidden parent never maps its popover), so
+        // the conversation pane hosts it there.
+        let (parent, px, py): (gtk::Widget, i32, i32) = if in_conversation {
+            (self.centre_pane.clone().upcast(), x, y)
+        } else {
+            let (px, py) = self
+                .member_list
+                .compute_point(&self.member_pane, &gtk::graphene::Point::new(x as f32, y as f32))
+                .map(|p| (p.x() as i32, p.y() as i32))
+                .unwrap_or((x, y));
+            (self.member_pane.clone().upcast(), px, py)
+        };
+        popover.set_parent(&parent);
         popover.set_autohide(false);
         popover.set_has_arrow(false);
         popover.set_halign(gtk::Align::Start);
@@ -3884,6 +4016,16 @@ impl ChatWindow {
                 let exists = self.app.store.borrow().buffer(&key).is_some();
                 if exists {
                     crate::open_popout(&self.app, key);
+                }
+            }
+            "whois" => {
+                // Only offered on DM rows, whose target is the peer's nick.
+                if let Some(net) = key.network_id {
+                    self.note_whois(&target);
+                    self.app.send(ClientVerb::Raw {
+                        network_id: net,
+                        line: format!("WHOIS {target} {target}"),
+                    });
                 }
             }
             "read" => {
@@ -4338,6 +4480,11 @@ impl ChatWindow {
             ));
             return;
         }
+        // Upload indicator (#9): the attach button becomes a busy marker for
+        // the duration — visible right where the action started, unlike the
+        // status line a phone user may never look at.
+        self.btn_attach.set_sensitive(false);
+        self.btn_attach.set_icon_name("content-loading-symbolic");
         self.status_label
             .set_text(&format!("uploading {filename} ({} KB)…", bytes.len() / 1024));
         let this = self.clone();
