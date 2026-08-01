@@ -32,7 +32,7 @@ fn chunks_for_line(line: &str, budget: usize) -> usize {
     let mut cur = String::new();
     let mut pending_ws = String::new();
 
-    let mut flush_new = |cur: &mut String, count: &mut usize, word: &str| {
+    let flush_new = |cur: &mut String, count: &mut usize, word: &str| {
         if !cur.is_empty() {
             *count += 1;
             cur.clear();

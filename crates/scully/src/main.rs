@@ -61,19 +61,45 @@ fn main() -> glib::ExitCode {
     }
 
     // Log the location of any panic. GTK signal handlers cannot unwind (a panic
-    // there aborts), so a logged location is often the only trace we get.
+    // there aborts), so a logged location is often the only trace we get —
+    // and the backtrace goes with it, since "it crashed" with no location is
+    // exactly the bug report we cannot act on.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        tracing::error!(panic = %info, "PANIC");
+        let bt = std::backtrace::Backtrace::force_capture();
+        tracing::error!(panic = %info, backtrace = %bt, "PANIC");
         default_hook(info);
     }));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "scully=info,lurker_client=info".into()),
-        )
-        .init();
+    // Two log destinations: stderr for anyone at a terminal, and a file in
+    // the data dir for everyone else. The file is the one that matters on
+    // Windows, where a windowed app HAS no stderr — a crash there used to
+    // vanish without a trace ("it only says it crashed"). Truncated when it
+    // grows past a few MB, at startup only, so the tail always covers the
+    // most recent crash.
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "scully=info,lurker_client=info".into())
+    };
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer as _;
+    let registry = tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(filter()));
+    match open_log_file() {
+        Some(file) => {
+            registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(std::sync::Mutex::new(file))
+                        .with_ansi(false)
+                        .with_filter(filter()),
+                )
+                .init();
+            tracing::info!(path = %log_path().display(), "logging to file");
+        }
+        None => registry.init(),
+    }
 
     // A second launch normally hands off to the running instance (presence and
     // read state are account-wide, so two processes would fight). SCULLY_APP_ID
@@ -115,6 +141,31 @@ fn main() -> glib::ExitCode {
     });
 
     gtk_app.run()
+}
+
+/// Where the log file lives: `<data dir>/scully.log`. Beside the token
+/// fallback, so "send me the log" has one answer per platform:
+/// `~/.local/share/scully/` on Linux, `%LOCALAPPDATA%\scully\` on Windows,
+/// `~/Library/Application Support/scully/` on macOS.
+fn log_path() -> std::path::PathBuf {
+    paths::data_dir().join("scully.log")
+}
+
+/// Open the log for append, truncating first once it exceeds 5 MB — enough
+/// history to cover several sessions, small enough to attach to a bug report.
+fn open_log_file() -> Option<std::fs::File> {
+    let path = log_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok()?;
+    }
+    let oversized = std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(!oversized)
+        .write(true)
+        .truncate(oversized)
+        .open(&path)
+        .ok()
 }
 
 fn load_css() {
