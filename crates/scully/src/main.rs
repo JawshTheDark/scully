@@ -17,6 +17,7 @@ mod commands;
 mod credentials;
 mod finder;
 mod format;
+mod frienddialog;
 mod input;
 mod login;
 mod media;

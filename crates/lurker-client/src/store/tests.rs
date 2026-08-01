@@ -764,3 +764,186 @@ fn hydrate_call_presence_replaces_stale_entries_with_the_snapshot() {
     assert!(changed.contains(&key("#dev")));
     assert!(changed.contains(&key("#ops")));
 }
+
+// ── Friends / contacts ────────────────────────────────────────────────────
+
+fn contacts_snapshot(contacts: serde_json::Value) -> serde_json::Value {
+    json!({ "kind": "contacts-snapshot", "contacts": contacts })
+}
+
+/// A store with network 1 connected, so presence isn't forced offline.
+fn connected_store() -> Store {
+    let mut store = Store::new();
+    apply(
+        &mut store,
+        json!({ "kind": "snapshot", "networks": [
+            { "networkId": 1, "state": "connected", "nick": "me" },
+            { "networkId": 2, "state": "connected", "nick": "me" }
+        ]}),
+    );
+    store
+}
+
+fn presence_event(network: i64, nick: &str, state: &str) -> serde_json::Value {
+    json!({
+        "kind": "irc", "type": "peer-presence", "networkId": network,
+        "target": format!(":server:{network}"), "nick": nick, "state": state
+    })
+}
+
+#[test]
+fn contacts_snapshot_populates_the_friends_list() {
+    let mut store = connected_store();
+    let out = apply(
+        &mut store,
+        contacts_snapshot(json!([
+            { "id": 7, "displayName": "amiantos", "notifyOnline": true,
+              "targets": [{ "networkId": 1, "nick": "amiantos", "isPrimary": true }] }
+        ])),
+    );
+    assert!(out.iter().any(|e| matches!(e, StoreEvent::ContactsChanged)));
+    assert_eq!(store.contacts().len(), 1);
+    assert_eq!(store.contacts()[0].display_name, "amiantos");
+}
+
+#[test]
+fn friends_sort_by_name_not_by_who_is_online() {
+    // A list that reorders itself as people connect is one you can't learn.
+    let mut store = connected_store();
+    apply(
+        &mut store,
+        contacts_snapshot(json!([
+            { "id": 1, "displayName": "Zed",
+              "targets": [{ "networkId": 1, "nick": "zed", "isPrimary": true }] },
+            { "id": 2, "displayName": "alice",
+              "targets": [{ "networkId": 1, "nick": "alice", "isPrimary": true }] }
+        ])),
+    );
+    apply(&mut store, presence_event(1, "zed", "online"));
+    let names: Vec<&str> = store.contacts().iter().map(|c| c.display_name.as_str()).collect();
+    assert_eq!(names, vec!["alice", "Zed"], "case-insensitive alphabetical, online-ness ignored");
+}
+
+#[test]
+fn a_friend_row_shows_the_primary_targets_presence_not_the_best_one() {
+    // The row opens the PRIMARY DM. An alt online elsewhere must not light the
+    // dot green for a conversation that is actually going nowhere.
+    let mut store = connected_store();
+    apply(
+        &mut store,
+        contacts_snapshot(json!([
+            { "id": 1, "displayName": "amiantos", "targets": [
+                { "networkId": 1, "nick": "amiantos", "isPrimary": true },
+                { "networkId": 2, "nick": "amiantos_", "isPrimary": false }
+            ]}
+        ])),
+    );
+    apply(&mut store, presence_event(1, "amiantos", "offline"));
+    apply(&mut store, presence_event(2, "amiantos_", "online"));
+    let c = store.contact(1).unwrap();
+    assert_eq!(store.contact_presence(c), Presence::Offline);
+}
+
+#[test]
+fn back_from_away_reads_as_online() {
+    // The server speaks four state words. Matching only three leaves a friend
+    // stuck showing away after they return.
+    let mut store = connected_store();
+    apply(&mut store, presence_event(1, "amiantos", "away"));
+    assert_eq!(store.presence(1, "amiantos"), Presence::Away);
+    apply(&mut store, presence_event(1, "amiantos", "back"));
+    assert_eq!(store.presence(1, "amiantos"), Presence::Online);
+}
+
+#[test]
+fn presence_is_case_insensitive() {
+    let mut store = connected_store();
+    apply(&mut store, presence_event(1, "AmIaNtOs", "online"));
+    assert_eq!(store.presence(1, "amiantos"), Presence::Online);
+}
+
+#[test]
+fn everyone_is_offline_on_a_network_that_is_down() {
+    let mut store = connected_store();
+    apply(&mut store, presence_event(1, "amiantos", "online"));
+    apply(
+        &mut store,
+        json!({ "kind": "snapshot", "networks": [{ "networkId": 1, "state": "disconnected" }]}),
+    );
+    assert_eq!(store.presence(1, "amiantos"), Presence::Offline);
+}
+
+#[test]
+fn an_unknown_peer_on_a_live_network_is_not_offline() {
+    // No row may only mean the server has no MONITOR. "Unknown" must not be
+    // painted as "offline".
+    let store = connected_store();
+    assert_eq!(store.presence(1, "nobody"), Presence::Unknown);
+}
+
+#[test]
+fn a_friends_primary_dm_is_hidden_from_its_own_network() {
+    let mut store = connected_store();
+    apply(
+        &mut store,
+        contacts_snapshot(json!([
+            { "id": 1, "displayName": "amiantos", "targets": [
+                { "networkId": 1, "nick": "AmIaNtOs", "isPrimary": true },
+                { "networkId": 1, "nick": "alt", "isPrimary": false }
+            ]}
+        ])),
+    );
+    assert!(store.is_friend_primary_dm(&key("amiantos")), "folded match, either casing");
+    assert!(!store.is_friend_primary_dm(&key("alt")), "non-primary targets stay in their section");
+    assert!(!store.is_friend_primary_dm(&key("#chat")));
+}
+
+#[test]
+fn clicking_a_friend_reuses_the_open_dm_rather_than_forking_on_case() {
+    let mut store = connected_store();
+    apply(&mut store, backlog("AmIaNtOs", "replace", vec![row(1, "hi")]));
+    apply(
+        &mut store,
+        contacts_snapshot(json!([
+            { "id": 1, "displayName": "amiantos",
+              "targets": [{ "networkId": 1, "nick": "amiantos", "isPrimary": true }] }
+        ])),
+    );
+    let c = store.contact(1).unwrap();
+    assert_eq!(store.contact_dm_key(c), Some(key("amiantos")));
+}
+
+#[test]
+fn contact_updated_and_deleted_keep_the_list_in_sync() {
+    let mut store = connected_store();
+    apply(
+        &mut store,
+        contacts_snapshot(json!([
+            { "id": 1, "displayName": "old",
+              "targets": [{ "networkId": 1, "nick": "amiantos", "isPrimary": true }] }
+        ])),
+    );
+    apply(
+        &mut store,
+        json!({ "kind": "contact-updated", "contact": {
+            "id": 1, "displayName": "new",
+            "targets": [{ "networkId": 1, "nick": "amiantos", "isPrimary": true }] }}),
+    );
+    assert_eq!(store.contacts()[0].display_name, "new");
+    assert!(store.contact_for(1, "AMIANTOS").is_some());
+
+    let out = apply(&mut store, json!({ "kind": "contact-deleted", "contactId": 1 }));
+    assert!(out.iter().any(|e| matches!(e, StoreEvent::ContactsChanged)));
+    assert!(store.contacts().is_empty());
+}
+
+#[test]
+fn peer_presence_never_materializes_a_buffer() {
+    // It is addressed to `:server:` only so the server's closed-buffer guard
+    // can't drop it; it is network state, not a row.
+    let mut store = connected_store();
+    let before = store.buffers.len();
+    let out = apply(&mut store, presence_event(1, "amiantos", "online"));
+    assert_eq!(store.buffers.len(), before);
+    assert!(out.iter().any(|e| matches!(e, StoreEvent::PresenceChanged(1))));
+}

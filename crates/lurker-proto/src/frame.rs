@@ -43,6 +43,41 @@ pub enum BacklogMode {
     Shell,
 }
 
+/// One of a contact's nicks. A person can be the same friend on several
+/// networks, which is the whole reason contacts exist rather than just DMs.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactTarget {
+    #[serde(default)]
+    pub network_id: i64,
+    #[serde(default)]
+    pub nick: String,
+    #[serde(default)]
+    pub is_primary: bool,
+}
+
+/// A friend, as Lurker models one.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Contact {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub notify_online: bool,
+    #[serde(default, deserialize_with = "lenient")]
+    pub targets: Vec<ContactTarget>,
+}
+
+impl Contact {
+    /// The nick to open when someone clicks this friend: the one marked
+    /// primary, else the first.
+    pub fn primary(&self) -> Option<&ContactTarget> {
+        self.targets.iter().find(|t| t.is_primary).or_else(|| self.targets.first())
+    }
+}
+
 /// One channel in a `chanlist-result` page.
 ///
 /// Deliberately NOT `rename_all = "camelCase"`: the server builds these rows by
@@ -327,8 +362,8 @@ pub enum ServerFrame {
     #[serde(rename = "contacts-snapshot")]
     #[serde(rename_all = "camelCase")]
     ContactsSnapshot {
-        #[serde(default)]
-        contacts: Vec<serde_json::Value>,
+        #[serde(default, deserialize_with = "lenient")]
+        contacts: Vec<Contact>,
     },
     /// Terminal marker of the connect burst. After it, **absence is proof**: a
     /// buffer key with no `backlog` frame is not open (§4.3). Without waiting
@@ -420,8 +455,17 @@ pub enum ServerFrame {
     },
     NickNoteUpdated(serde_json::Value),
     RelayBotUpdated(serde_json::Value),
-    ContactUpdated(serde_json::Value),
-    ContactDeleted(serde_json::Value),
+    /// One contact changed (added, renamed, targets edited).
+    #[serde(rename_all = "camelCase")]
+    ContactUpdated {
+        #[serde(default, deserialize_with = "lenient")]
+        contact: Option<Contact>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ContactDeleted {
+        #[serde(default)]
+        contact_id: i64,
+    },
     IgnoreListUpdated(serde_json::Value),
     #[serde(rename_all = "camelCase")]
     Settings {

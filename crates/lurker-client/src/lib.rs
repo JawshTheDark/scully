@@ -18,4 +18,4 @@ pub mod store;
 pub use error::{ConnState, Error, Result};
 pub use rest::{Edition, NetworkRow, Rest, ServerConfig, SettingOption, SettingsBootstrap, TokenResponse, UploadResponse, VoiceCall, VoicePolicy, VoiceToken};
 pub use socket::{ClientEvent, Socket, SocketConfig};
-pub use store::{Buffer, Network, Store, StoreEvent};
+pub use store::{Buffer, Network, Presence, Store, StoreEvent};

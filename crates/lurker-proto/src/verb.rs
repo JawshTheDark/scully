@@ -239,6 +239,17 @@ pub enum ClientVerb {
         #[serde(skip_serializing_if = "Option::is_none")]
         token: Option<i64>,
     },
+    /// Add or edit a friend. `contact_id` absent creates one.
+    #[serde(rename_all = "camelCase")]
+    SetContact {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        contact_id: Option<i64>,
+        display_name: String,
+        notify_online: bool,
+        targets: Vec<serde_json::Value>,
+    },
+    #[serde(rename_all = "camelCase")]
+    DeleteContact { contact_id: i64 },
     #[serde(rename_all = "camelCase")]
     ListChannels { network_id: i64 },
     #[serde(rename_all = "camelCase")]
@@ -380,6 +391,35 @@ mod tests {
             "open-buffer"
         );
         assert_eq!(json(&ClientVerb::Presence { visible: true })["type"], "presence");
+    }
+
+    #[test]
+    fn creating_a_contact_omits_the_id_rather_than_nulling_it() {
+        // `set_contact`'s schema is `additionalProperties: false` with
+        // `contactId: {type: integer}`, so a null would be a type error where
+        // an absent key is the documented "create" signal.
+        let v = json(&ClientVerb::SetContact {
+            contact_id: None,
+            display_name: "amiantos".into(),
+            notify_online: true,
+            targets: vec![serde_json::json!({
+                "networkId": 1, "nick": "amiantos", "isPrimary": true
+            })],
+        });
+        assert_eq!(v["type"], "set-contact");
+        assert!(!v.as_object().unwrap().contains_key("contactId"));
+        assert_eq!(v["displayName"], "amiantos");
+        assert_eq!(v["notifyOnline"], true);
+        assert_eq!(v["targets"][0]["isPrimary"], true);
+
+        let edit = json(&ClientVerb::SetContact {
+            contact_id: Some(7),
+            display_name: "amiantos".into(),
+            notify_online: false,
+            targets: vec![],
+        });
+        assert_eq!(edit["contactId"], 7);
+        assert_eq!(json(&ClientVerb::DeleteContact { contact_id: 7 })["type"], "delete-contact");
     }
 
     #[test]

@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use lurker_proto::{
-    BacklogFrame, BacklogMode, BufferKey, EventType, HistoryFrame, HistoryMode, Member,
+    BacklogFrame, BacklogMode, BufferKey, Contact, EventType, HistoryFrame, HistoryMode, Member,
     MessageEvent, NetworkSnapshot, NetworkState, ReadState, ServerFrame,
 };
 
@@ -69,6 +69,11 @@ pub enum StoreEvent {
     /// any "call active (N)" badge on that buffer should be recomputed. Carries
     /// the affected buffer.
     CallPresenceChanged(BufferKey),
+    /// The friends list changed (added, edited, removed, or a fresh snapshot).
+    ContactsChanged,
+    /// A tracked peer's online/away state changed on this network, so any
+    /// friend row showing it should be recomputed.
+    PresenceChanged(i64),
     /// A non-fatal server error frame.
     Error(String),
 }
@@ -205,6 +210,32 @@ pub struct Network {
     pub isupport: lurker_proto::isupport::Isupport,
 }
 
+/// How a tracked peer is currently reachable.
+///
+/// The server speaks four state words, not three: `back` is a *transition*
+/// out of away, and any client that only matches `online`/`away`/`offline`
+/// leaves a friend stuck showing away after they return.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Presence {
+    /// No row for this peer yet — not the same as known-offline.
+    #[default]
+    Unknown,
+    Online,
+    Away,
+    Offline,
+}
+
+impl Presence {
+    fn from_state(state: Option<&str>) -> Self {
+        match state {
+            Some("online") | Some("back") => Presence::Online,
+            Some("away") => Presence::Away,
+            Some("offline") => Presence::Offline,
+            _ => Presence::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Store {
     pub networks: BTreeMap<i64, Network>,
@@ -241,6 +272,14 @@ pub struct Store {
     /// means no active call. Kept independent of `Buffer` so a call can be shown
     /// on a channel whose buffer isn't materialised yet.
     call_counts: HashMap<BufferKey, u32>,
+
+    /// Friends, by server-assigned contact id.
+    contacts: BTreeMap<i64, Contact>,
+
+    /// Peer online state, keyed by network and **folded** nick. Fed by both the
+    /// snapshot's `peerPresence` map and live `peer-presence` events; the two
+    /// carry the same row shape precisely so one map can serve both.
+    presence: HashMap<(i64, String), Presence>,
 }
 
 impl Store {
@@ -271,6 +310,87 @@ impl Store {
     /// there is no call (Lurker #680).
     pub fn call_count(&self, key: &BufferKey) -> u32 {
         self.call_counts.get(key).copied().unwrap_or(0)
+    }
+
+    /// The friends list, case-insensitively alphabetical by display name.
+    ///
+    /// Deliberately *not* online-first: the web client sorts by name alone, and
+    /// a list that reorders itself whenever someone connects is a list you
+    /// cannot build muscle memory for.
+    pub fn contacts(&self) -> Vec<&Contact> {
+        let mut out: Vec<&Contact> = self.contacts.values().collect();
+        out.sort_by_key(|c| c.display_name.to_lowercase());
+        out
+    }
+
+    pub fn contact(&self, id: i64) -> Option<&Contact> {
+        self.contacts.get(&id)
+    }
+
+    /// Whether this nick is already somebody's friend on this network. Drives
+    /// the nick menu's Add-vs-Edit label. The server enforces that a
+    /// (network, nick) pair belongs to at most one contact.
+    pub fn contact_for(&self, network_id: i64, nick: &str) -> Option<&Contact> {
+        let folded = lurker_proto::fold(nick);
+        self.contacts.values().find(|c| {
+            c.targets
+                .iter()
+                .any(|t| t.network_id == network_id && lurker_proto::fold(&t.nick) == folded)
+        })
+    }
+
+    /// Presence of one (network, nick) target.
+    ///
+    /// Disconnect-aware, which is the whole subtlety: on a network that is
+    /// *down* every peer reads offline regardless of the last row we saw, while
+    /// on a live network a peer with no row at all stays `Unknown` — the server
+    /// may simply have no MONITOR support, and "unknown" must not be painted as
+    /// "offline".
+    pub fn presence(&self, network_id: i64, nick: &str) -> Presence {
+        let up = self
+            .networks
+            .get(&network_id)
+            .is_some_and(|n| n.state == NetworkState::Connected);
+        if !up {
+            return Presence::Offline;
+        }
+        self.presence
+            .get(&(network_id, lurker_proto::fold(nick)))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The presence a friend row shows: that of the **primary** target only.
+    ///
+    /// Not the best across their networks. The row opens the primary DM, so
+    /// showing an alt's online state here would light the dot green for a
+    /// conversation that is actually going nowhere.
+    pub fn contact_presence(&self, contact: &Contact) -> Presence {
+        match contact.primary() {
+            Some(t) => self.presence(t.network_id, &t.nick),
+            None => Presence::Unknown,
+        }
+    }
+
+    /// The buffer key a friend row opens: their primary target's DM, resolved
+    /// to an already-open buffer's casing when one exists so clicking never
+    /// forks a second buffer differing only in case.
+    pub fn contact_dm_key(&self, contact: &Contact) -> Option<BufferKey> {
+        let t = contact.primary()?;
+        let key = BufferKey::new(Some(t.network_id), &t.nick);
+        Some(self.buffers.get_key_value(&key).map_or(key, |(k, _)| k.clone()))
+    }
+
+    /// Whether this buffer is some friend's primary DM, and so is already
+    /// rendered under FRIENDS. The sidebar hides these from their own network
+    /// rather than listing the same conversation twice.
+    pub fn is_friend_primary_dm(&self, key: &BufferKey) -> bool {
+        let Some(net) = key.network_id else { return false };
+        self.contacts.values().any(|c| {
+            c.primary().is_some_and(|t| {
+                t.network_id == net && lurker_proto::fold(&t.nick) == key.target
+            })
+        })
     }
 
     /// Replace a network's known call counts with a fresh server snapshot from
@@ -482,6 +602,21 @@ impl Store {
                     out.push(StoreEvent::CallPresenceChanged(key));
                 }
             }
+            ServerFrame::ContactsSnapshot { contacts } => {
+                self.contacts = contacts.into_iter().map(|c| (c.id, c)).collect();
+                out.push(StoreEvent::ContactsChanged);
+            }
+            ServerFrame::ContactUpdated { contact } => {
+                if let Some(c) = contact {
+                    self.contacts.insert(c.id, c);
+                    out.push(StoreEvent::ContactsChanged);
+                }
+            }
+            ServerFrame::ContactDeleted { contact_id } => {
+                if self.contacts.remove(&contact_id).is_some() {
+                    out.push(StoreEvent::ContactsChanged);
+                }
+            }
             ServerFrame::Error { text } => {
                 out.push(StoreEvent::Error(text.unwrap_or_else(|| "unknown error".into())));
             }
@@ -514,6 +649,17 @@ impl Store {
         net.lag_ms = ns.lag_ms;
         net.away = ns.away.as_ref().is_some_and(|a| a.active);
         net.pinned = ns.pinned.clone();
+
+        // Presence rows for this network, replacing whatever we held: the
+        // snapshot is authoritative and a friend who went offline while we were
+        // away simply won't appear in it.
+        self.presence.retain(|(net, _), _| *net != id);
+        for (nick, row) in &ns.peer_presence {
+            self.presence.insert(
+                (id, lurker_proto::fold(nick)),
+                Presence::from_state(row.state.as_deref()),
+            );
+        }
 
         let pinned: HashSet<String> = ns.pinned.iter().map(|t| lurker_proto::fold(t)).collect();
 
@@ -595,6 +741,22 @@ impl Store {
             out.push(StoreEvent::WhoisResult(Box::new(event)));
             return;
         }
+        // Peer presence is network-level state, not a buffer row. The server
+        // addresses it to the `:server:` pseudo-buffer only so its closed-buffer
+        // guard can't drop it, so route on the network id and never let a
+        // missing system buffer swallow a friend coming online.
+        if event.event_type == EventType::PeerPresence {
+            if let (Some(net), Some(nick)) = (event.network_id, event.nick.as_ref()) {
+                let was = self.presence(net, nick);
+                let now = Presence::from_state(event.state.as_deref());
+                if now != Presence::Unknown && now != was {
+                    self.presence.insert((net, lurker_proto::fold(nick)), now);
+                    out.push(StoreEvent::PresenceChanged(net));
+                }
+            }
+            return;
+        }
+
         let key = event.buffer_key();
         let display = event.target.clone().unwrap_or_else(|| key.target.clone());
 

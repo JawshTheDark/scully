@@ -1234,6 +1234,9 @@ impl ChatWindow {
 
         for event in events {
             match event {
+                // Both change what the FRIENDS section shows: who is in it, and
+                // which of them is reachable (which also sets the header dot).
+                StoreEvent::ContactsChanged | StoreEvent::PresenceChanged(_) => relist = true,
                 StoreEvent::BufferListChanged => {
                     relist = true;
                     status = true;
@@ -1559,10 +1562,25 @@ impl ChatWindow {
         // Pinned buffers (of any kind) float to their own section; DMs and DCC
         // chats are pulled out of their networks into dedicated sections so
         // they are easy to find regardless of which network they belong to.
+        /// One sidebar row. Usually just a buffer, but a FRIENDS row shows the
+        /// contact's display name and presence rather than the DM's nick —
+        /// which is the entire point of a contact: one person, several nicks.
+        struct SidebarRow {
+            key: BufferKey,
+            label: Option<String>,
+            presence: Option<lurker_client::Presence>,
+            contact: Option<i64>,
+        }
+        impl SidebarRow {
+            fn plain(key: BufferKey) -> Self {
+                Self { key, label: None, presence: None, contact: None }
+            }
+        }
+
         struct Section {
             header: Option<String>,
             offline: bool,
-            keys: Vec<BufferKey>,
+            keys: Vec<SidebarRow>,
             /// Section that mixes buffers from several networks (pinned, DMs,
             /// DCC). Its rows carry the network name, because pulling a buffer
             /// out of its network otherwise loses the only thing that says
@@ -1571,6 +1589,13 @@ impl ChatWindow {
             /// The network this section IS, when it is one. Only these headers
             /// offer connect/disconnect.
             network_id: Option<i64>,
+            /// The FRIENDS section, whose header offers "Add a friend".
+            is_friends: bool,
+            /// Extra CSS class for the header's status dot, or `None` for no
+            /// dot at all. Networks report their connection; FRIENDS reports
+            /// whether friends are actually reachable; PINNED / DMs / DCC have
+            /// no single state to report, so they get nothing.
+            dot: Option<&'static str>,
         }
         let mut sections: Vec<Section> = Vec::new();
         let sort_key = |k: &BufferKey| (k.is_dm(), k.is_dcc(), k.target.clone());
@@ -1579,7 +1604,54 @@ impl ChatWindow {
         let system: Vec<BufferKey> =
             store.buffers.keys().filter(|k| k.network_id.is_none()).cloned().collect();
         if !system.is_empty() {
-            sections.push(Section { header: None, offline: false, keys: system, cross_network: false, network_id: None });
+            sections.push(Section {
+                header: None,
+                offline: false,
+                keys: system.into_iter().map(SidebarRow::plain).collect(),
+                cross_network: false,
+                network_id: None,
+                is_friends: false,
+                dot: None,
+            });
+        }
+
+        // FRIENDS — a cross-network gathering of DM shortcuts. One person can
+        // be several nicks on several networks; this section collapses them to
+        // one row that opens their primary DM.
+        let friends: Vec<SidebarRow> = store
+            .contacts()
+            .into_iter()
+            .filter_map(|c| {
+                let key = store.contact_dm_key(c)?;
+                Some(SidebarRow {
+                    key,
+                    label: Some(c.display_name.clone()),
+                    presence: Some(store.contact_presence(c)),
+                    contact: Some(c.id),
+                })
+            })
+            .collect();
+        if !friends.is_empty() {
+            // The dot answers "is anyone actually there?", not "am I connected?".
+            // Green when a friend is reachable, amber when the only ones on are
+            // away, red when nobody is.
+            let dot = if friends.iter().any(|r| r.presence == Some(lurker_client::Presence::Online))
+            {
+                ""
+            } else if friends.iter().any(|r| r.presence == Some(lurker_client::Presence::Away)) {
+                "away"
+            } else {
+                "offline"
+            };
+            sections.push(Section {
+                header: Some("☺ FRIENDS".to_string()),
+                offline: false,
+                keys: friends,
+                cross_network: true,
+                network_id: None,
+                is_friends: true,
+                dot: Some(dot),
+            });
         }
 
         // Pinned — across all networks, any buffer kind.
@@ -1594,9 +1666,11 @@ impl ChatWindow {
             sections.push(Section {
                 header: Some("★ PINNED".to_string()),
                 offline: false,
-                keys: pinned,
+                keys: pinned.into_iter().map(SidebarRow::plain).collect(),
                 cross_network: true,
                 network_id: None,
+                is_friends: false,
+                dot: None,
             });
         }
 
@@ -1606,7 +1680,9 @@ impl ChatWindow {
         let mut dms: Vec<BufferKey> = store
             .buffers
             .iter()
-            .filter(|(k, b)| k.is_dm() && !b.pinned)
+            // A friend's primary DM is shown under FRIENDS, so hide it here —
+            // otherwise the same conversation appears twice under two names.
+            .filter(|(k, b)| k.is_dm() && !b.pinned && !store.is_friend_primary_dm(k))
             .map(|(k, _)| k.clone())
             .collect();
         dms.sort_by_key(|k| k.target.clone());
@@ -1614,9 +1690,11 @@ impl ChatWindow {
             sections.push(Section {
                 header: Some("✉ DIRECT MESSAGES".to_string()),
                 offline: false,
-                keys: dms,
+                keys: dms.into_iter().map(SidebarRow::plain).collect(),
                 cross_network: true,
                 network_id: None,
+                is_friends: false,
+                dot: None,
             });
         }
 
@@ -1639,12 +1717,15 @@ impl ChatWindow {
             } else {
                 net.name.to_uppercase()
             };
+            let offline = net.state != lurker_proto::NetworkState::Connected;
             sections.push(Section {
                 header: Some(name),
-                offline: net.state != lurker_proto::NetworkState::Connected,
-                keys,
+                offline,
+                keys: keys.into_iter().map(SidebarRow::plain).collect(),
                 cross_network: false,
                 network_id: Some(*id),
+                is_friends: false,
+                dot: Some(if offline { "offline" } else { "" }),
             });
         }
 
@@ -1660,9 +1741,11 @@ impl ChatWindow {
             sections.push(Section {
                 header: Some("⇄ DCC CHATS".to_string()),
                 offline: false,
-                keys: dcc,
+                keys: dcc.into_iter().map(SidebarRow::plain).collect(),
                 cross_network: true,
                 network_id: None,
+                is_friends: false,
+                dot: None,
             });
         }
 
@@ -1707,8 +1790,8 @@ impl ChatWindow {
                 // Collapsing must not hide the fact that something wants
                 // attention, so a folded section carries its contents' unread
                 // and highlight totals on the header itself.
-                let (unread, highlights) = section.keys.iter().fold((0, 0), |(u, h), k| {
-                    store.buffer(k).map_or((u, h), |b| (u + b.unread, h + b.highlights))
+                let (unread, highlights) = section.keys.iter().fold((0, 0), |(u, h), r| {
+                    store.buffer(&r.key).map_or((u, h), |b| (u + b.unread, h + b.highlights))
                 });
 
                 let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -1731,8 +1814,8 @@ impl ChatWindow {
                     .css_classes(["net-dot"])
                     .valign(gtk::Align::Baseline)
                     .build();
-                if section.offline {
-                    dot.add_css_class("offline");
+                if let Some(extra) = section.dot.filter(|c| !c.is_empty()) {
+                    dot.add_css_class(extra);
                 }
                 let header = gtk::Label::builder()
                     .xalign(0.0)
@@ -1745,9 +1828,7 @@ impl ChatWindow {
                     header.add_css_class("offline");
                 }
                 header_box.append(&caret);
-                // Only real networks get a connection dot; the cross-network
-                // sections (pinned, DMs, DCC) have no single state to report.
-                if !section.cross_network {
+                if section.dot.is_some() {
                     header_box.append(&dot);
                 }
                 header_box.append(&header);
@@ -1801,6 +1882,20 @@ impl ChatWindow {
                     });
                 });
                 row.add_controller(click);
+
+                // Right-click the FRIENDS header to add one. (The nick menu and
+                // `/friend` are the other two ways in.)
+                if section.is_friends {
+                    let right = gtk::GestureClick::builder().button(3).build();
+                    let weak = self.clone_handle();
+                    right.connect_pressed(move |g, _, _, _| {
+                        g.set_state(gtk::EventSequenceState::Claimed);
+                        if let Some(this) = weak.upgrade() {
+                            crate::frienddialog::FriendDialog::add(&this.app);
+                        }
+                    });
+                    row.add_controller(right);
+                }
 
                 // Right-click a NETWORK header: bring it up or down, or remove
                 // it. Only real networks — the cross-network sections have no
@@ -1862,10 +1957,19 @@ impl ChatWindow {
                 continue;
             }
 
-            for key in section.keys {
+            for entry in section.keys {
+                let key = entry.key;
                 let buf = store.buffer(&key);
-                let label = buf.map(|b| b.display_name.clone()).unwrap_or_else(|| key.target.clone());
-                let display = if key.is_server_log() {
+                let label = entry
+                    .label
+                    .clone()
+                    .or_else(|| buf.map(|b| b.display_name.clone()))
+                    .unwrap_or_else(|| key.target.clone());
+                // A friend's row is titled by the contact, so none of the
+                // buffer-kind decoration below applies to it.
+                let display = if entry.label.is_some() {
+                    label
+                } else if key.is_server_log() {
                     "server".to_string()
                 } else if key.is_system() {
                     "⚑ lurker".to_string()
@@ -1950,6 +2054,57 @@ impl ChatWindow {
                 }
                 if key.is_dcc() {
                     row.add_css_class("dcc");
+                }
+                // A friend who isn't reachable recedes, the same way a parted
+                // channel does — the row still works, it just isn't going
+                // anywhere right now.
+                match entry.presence {
+                    Some(lurker_client::Presence::Offline) => row.add_css_class("peer-offline"),
+                    Some(lurker_client::Presence::Away) => row.add_css_class("peer-away"),
+                    _ => {}
+                }
+                if let Some(contact_id) = entry.contact {
+                    // Friend rows get their own menu: this row is a person, not
+                    // a buffer, so close/leave/pin would be answering the wrong
+                    // question.
+                    // Coordinates from a gesture on the ROW are row-relative,
+                    // so map them through the row itself — mapping them as
+                    // list-relative opens every menu at the top of the pane.
+                    let menu_at = {
+                        let anchor = row.clone();
+                        move |this: &Rc<Self>, x: f64, y: f64| {
+                            let (px, py) = anchor
+                                .compute_point(
+                                    &this.buffer_pane,
+                                    &gtk::graphene::Point::new(x as f32, y as f32),
+                                )
+                                .map(|p| (p.x() as i32, p.y() as i32))
+                                .unwrap_or((x as i32, y as i32));
+                            this.open_friend_menu(contact_id, px, py);
+                        }
+                    };
+
+                    let right = gtk::GestureClick::builder().button(3).build();
+                    let weak = self.clone_handle();
+                    let open = menu_at.clone();
+                    right.connect_pressed(move |g, _, x, y| {
+                        g.set_state(gtk::EventSequenceState::Claimed);
+                        if let Some(this) = weak.upgrade() {
+                            open(&this, x, y);
+                        }
+                    });
+                    row.add_controller(right);
+
+                    // Same menu by press-and-hold, for touch.
+                    let hold = gtk::GestureLongPress::new();
+                    let weak = self.clone_handle();
+                    hold.connect_pressed(move |g, x, y| {
+                        g.set_state(gtk::EventSequenceState::Claimed);
+                        if let Some(this) = weak.upgrade() {
+                            menu_at(&this, x, y);
+                        }
+                    });
+                    row.add_controller(hold);
                 }
                 if unread > 0 || highlights > 0 {
                     row.add_css_class("has-unread");
@@ -2700,6 +2855,21 @@ impl ChatWindow {
             model.append_section(Some("Voice call"), &call);
         }
 
+        // Friends. The label states which it will do, so the item never
+        // silently opens an editor for a contact the user forgot they made.
+        let already = self
+            .active
+            .borrow()
+            .as_ref()
+            .and_then(|k| k.network_id)
+            .is_some_and(|net| self.app.store.borrow().contact_for(net, nick).is_some());
+        let friend = gio::Menu::new();
+        friend.append_item(&gio::MenuItem::new(
+            Some(if already { "Edit friend\u{2026}" } else { "Add to friends\u{2026}" }),
+            Some("nick.cmd::friend"),
+        ));
+        model.append_section(None, &friend);
+
         let this = self.clone();
         let group = gio::SimpleActionGroup::new();
         let action = gio::SimpleAction::new("cmd", Some(glib::VariantTy::STRING));
@@ -2729,9 +2899,6 @@ impl ChatWindow {
         popover.set_halign(gtk::Align::Start);
         popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(px, py, 1, 1)));
 
-        // Header showing who and the clicker's own status, so the gating is
-        // legible ("you are op here").
-        let _ = nick;
         popover.popup();
         *self.nick_menu.borrow_mut() = Some(popover);
     }
@@ -2790,6 +2957,65 @@ impl ChatWindow {
         *self.menu_buffer.borrow_mut() = Some(key);
         popover.popup();
         *self.buffer_menu.borrow_mut() = Some(popover);
+    }
+
+    /// Open the context menu for a FRIENDS row.
+    ///
+    /// Deliberately short: this row is a *person*, so the buffer menu's
+    /// close/leave/pin would be answering the wrong question. Removal sits
+    /// behind the editor's own Remove button rather than one stray click away.
+    fn open_friend_menu(self: &Rc<Self>, contact_id: i64, x: i32, y: i32) {
+        if let Some(old) = self.buffer_menu.borrow_mut().take() {
+            old.unparent();
+        }
+
+        let model = gio::Menu::new();
+        model.append_item(&gio::MenuItem::new(Some("Open DM"), Some("friend.open")));
+        model.append_item(&gio::MenuItem::new(Some("Edit friend…"), Some("friend.edit")));
+
+        let group = gio::SimpleActionGroup::new();
+
+        let open = gio::SimpleAction::new("open", None);
+        let this = self.clone();
+        open.connect_activate(move |_, _| {
+            this.close_menus();
+            let key = {
+                let store = this.app.store.borrow();
+                store.contact(contact_id).and_then(|c| store.contact_dm_key(c))
+            };
+            if let Some(key) = key {
+                this.open_friend_dm(&key);
+            }
+        });
+        group.add_action(&open);
+
+        let edit = gio::SimpleAction::new("edit", None);
+        let this = self.clone();
+        edit.connect_activate(move |_, _| {
+            this.close_menus();
+            crate::frienddialog::FriendDialog::edit(&this.app, contact_id);
+        });
+        group.add_action(&edit);
+
+        let popover = gtk::PopoverMenu::from_model(Some(&model));
+        popover.insert_action_group("friend", Some(&group));
+        popover.set_parent(&self.buffer_pane);
+        popover.set_autohide(false);
+        popover.set_has_arrow(false);
+        popover.set_halign(gtk::Align::Start);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x, y, 1, 1)));
+        popover.popup();
+        *self.buffer_menu.borrow_mut() = Some(popover);
+    }
+
+    /// Open a friend's DM, asking the server for it first if we have never
+    /// held that buffer. Clicking a friend is explicit user intent, which is
+    /// the one case `open-buffer` is for (§4.3).
+    pub fn open_friend_dm(self: &Rc<Self>, key: &BufferKey) {
+        if !self.app.store.borrow().buffers.contains_key(key) {
+            self.app.open_buffer(key);
+        }
+        self.open_key(key);
     }
 
     /// Show `content` as a lightbox over this window's conversation.
@@ -3238,6 +3464,13 @@ impl ChatWindow {
                 Ok(()) => status.set_text(&format!("{action}: {who}")),
                 Err(e) => status.set_text(&format!("call moderation failed — {e}")),
             });
+            return;
+        }
+
+        // Friends are account state, not an IRC command — handled here rather
+        // than in nickmenu's pure verb table.
+        if id == "friend" {
+            crate::frienddialog::FriendDialog::add_for_nick(&self.app, network_id, &nick);
             return;
         }
 
@@ -3999,6 +4232,19 @@ impl ChatWindow {
                 } else {
                     None
                 }
+            }
+            // `/friend` opens the editor: with no friends yet the sidebar has
+            // no FRIENDS section to click, so this is the way in from cold.
+            // With a nick, it pre-fills for that person on this network.
+            ("friend" | "friends", net) => {
+                let who = args.split_whitespace().next().unwrap_or("");
+                match (net, who.is_empty()) {
+                    (Some(net), false) => {
+                        crate::frienddialog::FriendDialog::add_for_nick(&self.app, net, who)
+                    }
+                    _ => crate::frienddialog::FriendDialog::add(&self.app),
+                }
+                return true;
             }
             ("search" | "find", _) => {
                 if !args.is_empty() {

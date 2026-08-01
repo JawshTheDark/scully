@@ -121,6 +121,23 @@ window {
   color: @bad;
 }
 
+/* The FRIENDS dot answers "is anyone actually there?" — amber when the only
+   friends on are away. */
+.net-dot.away {
+  color: @warn;
+}
+
+/* A friend who isn't reachable recedes, the way a parted channel does: the row
+   still works, the conversation just isn't going anywhere right now. An unread
+   badge still stands out beside it. */
+row.buffer-row.peer-offline label {
+  color: #4a4a58;
+}
+
+row.buffer-row.peer-away label {
+  color: @fg_muted;
+}
+
 /* Buffers belonging to the section above them are indented, so a long list
    reads as grouped rather than as one flat column.
 
