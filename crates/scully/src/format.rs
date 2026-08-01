@@ -17,11 +17,6 @@ use lurker_proto::{EventType, MessageEvent};
 pub const NICK_WIDTH: usize = 13;
 /// Width of the timestamp column (`HH:MM:SS`).
 pub const TIME_WIDTH: usize = 8;
-/// Gap columns either side of the nick.
-pub const GUTTER: usize = 2;
-
-/// Total columns before the message text begins — the hanging indent.
-pub const TEXT_COLUMN: usize = TIME_WIDTH + GUTTER + NICK_WIDTH + GUTTER;
 
 /// Which style a line is drawn in. Maps to a GtkTextTag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,18 +156,37 @@ fn pad_nick(s: &str) -> String {
     }
 }
 
+/// Rendered width of `strftime`, in characters.
+///
+/// Every timestamp in a session uses one format and strftime zero-pads its
+/// numeric fields, so a single reference render gives the column width. This
+/// matters because the timestamp leads the line: a row with no time must still
+/// occupy exactly the same column, and `TIME_WIDTH` alone is wrong for any
+/// format that isn't `HH:mm:ss` (`hh:mm:ss a` renders eleven characters).
+pub fn time_width(strftime: &str) -> usize {
+    if strftime.is_empty() {
+        return 0;
+    }
+    glib::DateTime::from_utc(2026, 1, 1, 0, 0, 0.0)
+        .ok()
+        .and_then(|d| d.format(strftime).ok())
+        .map(|s| s.chars().count())
+        .unwrap_or(TIME_WIDTH)
+}
+
 /// Local timestamp from the event's ISO 8601 stamp, in the given strftime
 /// format (see [`time_format_to_strftime`]).
 fn format_time(raw: Option<&str>, strftime: &str) -> String {
-    let Some(raw) = raw else { return " ".repeat(TIME_WIDTH) };
+    let blank = || " ".repeat(time_width(strftime));
+    let Some(raw) = raw else { return blank() };
     match glib::DateTime::from_iso8601(raw, None) {
         Ok(dt) => dt
             .to_local()
             .ok()
             .and_then(|d| d.format(strftime).ok())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| " ".repeat(TIME_WIDTH)),
-        Err(_) => " ".repeat(TIME_WIDTH),
+            .unwrap_or_else(blank),
+        Err(_) => blank(),
     }
 }
 
@@ -363,6 +377,23 @@ mod tests {
         assert_eq!(time_format_to_strftime("[HH]"), "[%H]");
         assert_eq!(time_format_to_strftime("HH·mm"), "%H·%M", "multi-byte separator survives");
         assert_eq!(time_format_to_strftime(""), "");
+    }
+
+    #[test]
+    fn the_time_column_is_as_wide_as_the_format_renders() {
+        // The stamp leads the line now, so a row with no time has to pad to
+        // exactly this width or the text beside it steps out of column.
+        // TIME_WIDTH alone is only right for HH:mm:ss.
+        assert_eq!(time_width("%H:%M:%S"), 8);
+        assert_eq!(time_width("%I:%M:%S:%P"), 11, "12-hour with a meridiem is wider");
+        assert_eq!(time_width("%H:%M"), 5);
+        assert_eq!(time_width(""), 0, "timestamps off: no column at all");
+    }
+
+    #[test]
+    fn a_row_with_no_time_still_fills_the_column() {
+        assert_eq!(format_time(None, "%I:%M:%S:%P").chars().count(), 11);
+        assert_eq!(format_time(Some("not a date"), "%H:%M:%S"), "        ");
     }
 
     #[test]

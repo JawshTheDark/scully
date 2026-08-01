@@ -30,7 +30,7 @@ fn human_bytes(n: u64) -> String {
         format!("{} KB", n / 1024)
     }
 }
-use crate::format::{self, TEXT_COLUMN};
+use crate::format;
 
 /// Scroll within this many pixels of the top to trigger loading an older page.
 const PAGE_TRIGGER_PX: f64 = 150.0;
@@ -698,25 +698,16 @@ impl ChatWindow {
             return;
         }
 
-        // Messages are indented two spaces under their author heading, so that
-        // is where wrapped lines should hang — not under an old fixed nick
-        // column.
-        let sample = "  ";
-        let layout = self.text_view.create_pango_layout(Some(sample));
+        // Every row opens with the timestamp column, so that is where wrapped
+        // lines should hang — under the text, not back under the time.
+        // Zero when the user has turned timestamps off, in which case there is
+        // no column to hang under.
+        let sample = " ".repeat(self.text_column());
+        let layout = self.text_view.create_pango_layout(Some(sample.as_str()));
         let (prefix_px, _) = layout.pixel_size();
 
         let max_indent = (width as f32 * Self::MAX_INDENT_FRACTION) as i32;
         let indent = prefix_px.clamp(0, max_indent.max(0));
-
-        // One right-aligned tab stop just inside the trailing edge: every row
-        // ends with "\t<time>", so timestamps line up flush right whatever the
-        // message length. Recomputed here because the stop is a pixel position
-        // and must follow the pane as it is resized.
-        let time_px = self.text_view.create_pango_layout(Some("00:00:00pm")).pixel_size().0;
-        let stop = (width - 10).max(time_px + 20);
-        let mut tabs = gtk::pango::TabArray::new(1, true);
-        tabs.set_tab(0, gtk::pango::TabAlign::Right, stop);
-        self.text_view.set_tabs(&tabs);
 
         // Pango's negative-indent semantics: the FIRST line stays at the
         // margin and *subsequent* (wrapped) lines are indented by `-indent`.
@@ -1497,6 +1488,10 @@ impl ChatWindow {
             .map(format::time_format_to_strftime)
             .unwrap_or_else(|| "%H:%M:%S".to_string());
         *self.time_fmt.borrow_mut() = fmt;
+        // The hanging indent is measured from the timestamp column, so a
+        // format change moves it. Without this, switching to a wider format
+        // leaves wrapped lines hanging under the old column.
+        self.apply_indent();
 
         // Layout toggles govern full windows; a popout's whole point is the
         // missing sidebar, so the setting must not resurrect it.
@@ -2538,6 +2533,10 @@ impl ChatWindow {
                 let same_speaker = !breaks_group
                     && self.last_author.borrow().as_deref() == Some(author.as_str());
                 if !same_speaker {
+                    // The heading is a row like any other, so it carries the
+                    // time too — leaving it blank punched a hole in the
+                    // timestamp column every time somebody started talking.
+                    self.insert_time(line);
                     self.insert_with_tags(
                         author,
                         &[line.nick_tag.as_deref().unwrap_or("nick-plain"), "author"],
@@ -2545,12 +2544,13 @@ impl ChatWindow {
                     self.text.insert(&mut self.text.end_iter(), "\n");
                 }
                 *self.last_author.borrow_mut() = Some(author.clone());
-                self.insert_with_tags("  ", &["time"]);
+                self.insert_time(line);
             }
             None => {
                 // Presence, modes, server text: standalone rows keep their
                 // marker column and break any run of speech above them.
                 *self.last_author.borrow_mut() = None;
+                self.insert_time(line);
                 self.insert_with_tags(line.nick.trim_start(), &[line
                     .nick_tag
                     .as_deref()
@@ -2586,14 +2586,33 @@ impl ChatWindow {
             }
         }
 
-        // Timestamp last, behind a tab. The view carries a single right-aligned
-        // tab stop at its trailing edge (see apply_indent), so the time lands
-        // flush right regardless of how long the message was — the column stays
-        // readable without stealing width from the message the way a leading
-        // fixed column does.
-        if !line.time.trim().is_empty() {
-            self.insert_with_tags("\t", &["time"]);
-            self.insert_with_tags(line.time.trim(), &["time"]);
+    }
+
+    /// Write the leading timestamp column for a row.
+    ///
+    /// Padded to the format's own rendered width rather than trimmed, so rows
+    /// that carry no time still occupy the column and the text beside them
+    /// stays aligned.
+    fn insert_time(&self, line: &format::Line) {
+        let width = format::time_width(&self.time_fmt.borrow());
+        if width == 0 {
+            return;
+        }
+        let stamp = line.time.trim();
+        let padded = format!("{stamp:<width$} ");
+        self.insert_with_tags(&padded, &["time"]);
+    }
+
+    /// Columns before the message text — the timestamp plus its trailing space.
+    ///
+    /// Everything that has to line up with the text uses this: the hanging
+    /// indent for wrapped lines, and the blank run that pushes an inline
+    /// preview into the same column. Inline previews are the one thing that
+    /// does *not* get a timestamp of its own; it belongs to the row above.
+    fn text_column(&self) -> usize {
+        match format::time_width(&self.time_fmt.borrow()) {
+            0 => 0,
+            w => w + 1,
         }
     }
 
@@ -3600,8 +3619,9 @@ impl ChatWindow {
             if let Some(widget) = widget {
                 let mut end = self.text.end_iter();
                 self.text.insert(&mut end, "\n");
-                // Indent the embed to the text column.
-                self.insert_with_tags(&" ".repeat(TEXT_COLUMN), &["time"]);
+                // Indent the embed to the text column — which now follows the
+                // timestamp format, not the old fixed nick column.
+                self.insert_with_tags(&" ".repeat(self.text_column()), &["time"]);
                 let mut end = self.text.end_iter();
                 let anchor = self.text.create_child_anchor(&mut end);
                 self.text_view.add_child_at_anchor(&widget, &anchor);
@@ -3623,7 +3643,7 @@ impl ChatWindow {
             let cached = self.app.previews.borrow().get(&url).cloned();
             match cached {
                 Some(Some(preview)) => {
-                    let indent = " ".repeat(TEXT_COLUMN);
+                    let indent = " ".repeat(self.text_column());
                     if !preview.title.is_empty() {
                         self.text.insert(&mut self.text.end_iter(), "\n");
                         self.insert_with_tags(&indent, &["time"]);
