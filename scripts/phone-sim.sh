@@ -16,6 +16,14 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+# Not sudo. A nested compositor attaches to YOUR session's Wayland socket via
+# XDG_RUNTIME_DIR, and root has neither — kwin segfaults after failing to
+# bind. Nothing here needs privileges.
+if [ "$(id -u)" = 0 ]; then
+  echo "phone-sim: run this as your normal user, not with sudo" >&2
+  exit 1
+fi
+
 W=720 H=1440
 BIN=${SCULLY_BIN:-target/debug/scully}
 [ -x "$BIN" ] || cargo build -p scully
