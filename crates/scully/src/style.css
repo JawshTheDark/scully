@@ -605,3 +605,18 @@ button.mirc-swatch {
   padding: 0;
   font-size: 13pt;
 }
+
+/* Click-to-play poster for video/audio links — the media pipeline does not
+   exist until this is pressed. */
+button.embed-poster {
+  background-image: none;
+  background-color: @bg_soft;
+  color: @fg;
+  border: 1px solid @border;
+  border-radius: 3px;
+  padding: 8px 14px;
+}
+
+button.embed-poster:hover {
+  border-color: @accent;
+}

@@ -2900,6 +2900,39 @@ impl ChatWindow {
     /// is still valid. Call this immediately before `set_text("")` so GTK
     /// never unmaps a child against a half-cleared buffer (the SIGSEGV in
     /// `gtk_text_view_remove` the coredump pinned).
+    /// A poster button that only constructs the real media widget — and with
+    /// it the native pipeline — when the user presses play.
+    fn deferred_player(url: &str, audio: bool) -> gtk::Widget {
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let name = url.rsplit('/').next().unwrap_or(url);
+        let poster = gtk::Button::builder()
+            .label(format!("▶ {name}"))
+            .tooltip_text(if audio { "Play audio" } else { "Play video" })
+            .css_classes(["embed", "embed-poster"])
+            .build();
+        container.append(&poster);
+
+        let container_ref = container.clone();
+        let url = url.to_string();
+        poster.connect_clicked(move |btn| {
+            let media = gtk::MediaFile::for_file(&gtk::gio::File::for_uri(&url));
+            let widget: gtk::Widget = if audio {
+                let controls = gtk::MediaControls::new(Some(&media));
+                controls.set_size_request(360, -1);
+                controls.upcast()
+            } else {
+                let video = gtk::Video::builder().media_stream(&media).build();
+                video.set_size_request(420, 260);
+                video.upcast()
+            };
+            widget.add_css_class("embed");
+            container_ref.remove(btn);
+            container_ref.append(&widget);
+            media.play();
+        });
+        container.upcast()
+    }
+
     fn clear_embeds(&self) {
         for widget in self.embeds.borrow_mut().drain(..) {
             // The widget's parent is the TextView; remove there.
@@ -4089,19 +4122,21 @@ impl ChatWindow {
                         }
                     }
                 }
+                // Video and audio are CLICK-TO-PLAY, never auto-instantiated.
+                // Building a gtk::MediaFile during render spins up a native
+                // media pipeline (gstreamer) for every A/V link in the
+                // scrollback — and on a machine where that backend is broken
+                // or absent (the Windows bundle has no gstreamer at all), the
+                // pipeline dies in NATIVE code: no panic, no backtrace, the
+                // log just stops. Field-reported as an unopenable channel —
+                // one .mp4 in the backlog crashed the app on every visit.
+                // A poster button turns that poisoned-buffer crash into, at
+                // very worst, a crash on a deliberate press of play.
                 crate::media::MediaKind::Video if device.inline_videos => {
-                    let media = gtk::MediaFile::for_file(&gtk::gio::File::for_uri(&url));
-                    let video = gtk::Video::builder().media_stream(&media).build();
-                    video.set_size_request(420, 260);
-                    video.add_css_class("embed");
-                    Some(video.upcast())
+                    Some(Self::deferred_player(&url, false))
                 }
                 crate::media::MediaKind::Audio if device.inline_audio => {
-                    let media = gtk::MediaFile::for_file(&gtk::gio::File::for_uri(&url));
-                    let controls = gtk::MediaControls::new(Some(&media));
-                    controls.set_size_request(360, -1);
-                    controls.add_css_class("embed");
-                    Some(controls.upcast())
+                    Some(Self::deferred_player(&url, true))
                 }
                 _ => None,
             };
