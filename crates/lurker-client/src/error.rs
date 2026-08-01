@@ -43,6 +43,12 @@ pub enum Error {
 
     #[error("could not parse server response: {0}")]
     Decode(#[from] serde_json::Error),
+
+    /// No inbound traffic (not even a server ping) within the liveness
+    /// window — a half-open connection, most often after resume from
+    /// suspend. Retryable by definition: reconnecting is the cure.
+    #[error("connection silent past the liveness window")]
+    Timeout,
 }
 
 impl Error {

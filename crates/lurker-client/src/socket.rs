@@ -262,9 +262,26 @@ async fn run_once(
     });
 
     let mut saw_frame = false;
+    // Client-side liveness. The server pings every WS client on a ~60 s
+    // sweep, so a healthy connection ALWAYS has inbound traffic inside this
+    // window. When nothing arrives — the classic case being resume from
+    // suspend, where the NAT mapping died hours ago and no FIN will ever be
+    // delivered — `stream.next()` would otherwise wait forever on a half-open
+    // TCP connection: the client shows "connected", every hydrate request
+    // falls into the void, and shell buffers render blank until an app
+    // restart (#12). Two missed sweeps means dead; drop and reconnect.
+    const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(130);
     let result: Result<bool> = loop {
         tokio::select! {
             _ = shutdown.changed() => break Ok(saw_frame),
+
+            _ = tokio::time::sleep(READ_DEADLINE) => {
+                tracing::warn!(
+                    "no inbound traffic for {}s — connection presumed dead, reconnecting",
+                    READ_DEADLINE.as_secs()
+                );
+                break Err(Error::Timeout);
+            }
 
             incoming = stream.next() => {
                 match incoming {
