@@ -73,6 +73,11 @@ pub struct Line {
     /// Kept separate from `nick` because that field is the row's left-column
     /// marker (`-->`, `--`, `*`), which is not the same thing as authorship.
     pub author: Option<String>,
+    /// Whether the server flagged this row as matching a highlight rule
+    /// (§5.3). Drives the whole-line wash for rows whose KIND isn't
+    /// `Highlight` — a matched /me keeps its action styling but still earns
+    /// the gold.
+    pub matched: bool,
     /// The event's moment as unix seconds, for the author-collapse window
     /// (`look.message.collapse_authors_window`). `None` when the event carried
     /// no parseable time — such rows never collapse.
@@ -236,6 +241,7 @@ pub fn summary_line(summary: &lurker_proto::consolidate::Summary, strftime: &str
         nick_tag: Some("nick-plain".to_string()),
         text: summary.render(),
         kind: LineKind::NickChange,
+        matched: false,
         unix: None,
     }
 }
@@ -391,9 +397,14 @@ pub fn line_for(event: &MessageEvent, opts: &RenderOpts) -> Option<Line> {
     };
 
     Some(Line {
+        matched: event.matched,
         unix: event.time.as_deref().and_then(lurker_proto::timeparse::rfc3339_to_unix),
+        // Actions deliberately carry NO author: the body already leads with
+        // the nick (`* freakyy85 slaps…`), and the classic layout prints the
+        // author column before the body — with one, /me rendered as
+        // "freakyy85: freakyy85 slaps…", nick doubled (field report).
         author: match event.event_type {
-            EventType::Message | EventType::Action => event.nick.clone(),
+            EventType::Message => event.nick.clone(),
             _ => None,
         },
         time,
@@ -577,6 +588,31 @@ mod tests {
         let mut quit = ev(EventType::Quit);
         quit.text = Some("Ping timeout".into());
         assert_eq!(line_for(&quit, &RenderOpts::default()).unwrap().text, "alice quit (Ping timeout)");
+    }
+
+    #[test]
+    fn actions_carry_no_author_so_the_nick_never_doubles() {
+        // Field report: /me rendered as "freakyy85: freakyy85 slaps…" — the
+        // classic layout prints the author column before a body that already
+        // leads with the nick. An action line is `* nick does thing`, whole.
+        let mut act = ev(EventType::Action);
+        act.text = Some("slaps Jawsh around a bit with a large trout".into());
+        let line = line_for(&act, &RenderOpts::default()).unwrap();
+        assert_eq!(line.author, None);
+        assert_eq!(line.nick.trim(), "*");
+        assert_eq!(line.text, "alice slaps Jawsh around a bit with a large trout");
+    }
+
+    #[test]
+    fn a_matched_action_is_flagged_for_the_highlight_wash() {
+        // The slap that reported this was matched:true — a highlight. It
+        // keeps its action KIND (italic styling) but must carry the flag the
+        // whole-line wash keys on.
+        let mut act = ev(EventType::Action);
+        act.matched = true;
+        let line = line_for(&act, &RenderOpts::default()).unwrap();
+        assert_eq!(line.kind, LineKind::Action);
+        assert!(line.matched);
     }
 
     #[test]

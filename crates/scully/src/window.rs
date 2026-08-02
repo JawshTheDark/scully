@@ -3176,7 +3176,7 @@ impl ChatWindow {
         // A highlight paints its WHOLE line, Spooky-style (#8): a dark-gold
         // wash makes mentions findable while scrolling. Derived from the warn
         // colour at low alpha so a custom palette recolours it too.
-        if line.kind == format::LineKind::Highlight {
+        if line.kind == format::LineKind::Highlight || line.matched {
             if let Some(tag) = self.highlight_row_tag() {
                 let end = self.text.end_iter();
                 let mut start = end;
