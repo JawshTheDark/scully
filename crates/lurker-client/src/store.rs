@@ -89,6 +89,13 @@ pub struct Buffer {
     /// First-seen casing, kept for display while identity stays folded (§5.2).
     pub display_name: String,
     pub events: VecDeque<MessageEvent>,
+    /// When each nick (folded) last said something, unix seconds — the smart
+    /// event filter's clock. Maintained at INGEST, one timestamp parse per
+    /// event lifetime, because the render path was rebuilding this map — 500
+    /// ISO parses — on every redraw, which is every incoming message.
+    /// Deliberately outlives ring eviction: "last spoke" is still true after
+    /// the message itself scrolls away.
+    pub last_spoke: std::collections::HashMap<String, i64>,
     /// High-water mark of applied ids, used for the §9.6 freshness test.
     ///
     /// Tracked separately from the ring rather than derived from it, so that
@@ -173,6 +180,18 @@ impl Buffer {
     /// Insert keeping the ring ordered by id (§5.3: `time` is not monotonic
     /// with respect to `id`, so ordering is always by id).
     fn insert_ordered(&mut self, event: MessageEvent) {
+        // The one gate every ring entry passes — live, backlog and history
+        // alike — which is what makes it the right place to keep last_spoke:
+        // parse the timestamp once here, never again at render.
+        if !event.is_self && event.event_type.is_chat() {
+            if let (Some(nick), Some(t)) = (
+                event.nick.as_deref(),
+                event.time.as_deref().and_then(lurker_proto::timeparse::rfc3339_to_unix),
+            ) {
+                let entry = self.last_spoke.entry(lurker_proto::fold(nick)).or_insert(t);
+                *entry = (*entry).max(t);
+            }
+        }
         match event.id {
             // Ephemeral rows have no id and simply append at the live edge.
             None => self.events.push_back(event),

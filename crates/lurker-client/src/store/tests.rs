@@ -1013,3 +1013,30 @@ fn snapshot_peer_presence_hydrates_friend_state() {
     assert_eq!(store.contact_presence(store.contact(2).unwrap()), Presence::Away);
     assert_eq!(store.contact_presence(store.contact(3).unwrap()), Presence::Offline);
 }
+
+#[test]
+fn last_spoke_is_maintained_at_ingest_and_survives_eviction() {
+    // The smart filter's clock: parsed once per event lifetime, at the one
+    // gate every ring entry passes, and deliberately outliving ring eviction
+    // — "last spoke" stays true after the message scrolls away.
+    let mut store = Store::new();
+    let mut ev = msg(1, "#chat", "Alice", "hi");
+    ev["time"] = serde_json::json!("2026-07-28T00:00:00Z");
+    apply(&mut store, ev);
+    let buf = store.buffer(&key("#chat")).unwrap();
+    assert_eq!(buf.last_spoke.get("alice").copied(), Some(1785196800), "folded nick");
+
+    // An older replayed row must not move the clock backwards.
+    let mut older = msg(2, "#chat", "alice", "earlier");
+    older["time"] = serde_json::json!("2026-07-27T00:00:00Z");
+    apply(&mut store, older);
+    let buf = store.buffer(&key("#chat")).unwrap();
+    assert_eq!(buf.last_spoke.get("alice").copied(), Some(1785196800), "monotonic");
+
+    // Own echoes never count — smart filtering exempts yourself anyway.
+    let mut own = msg(3, "#chat", "me", "mine");
+    own["self"] = serde_json::json!(true);
+    own["time"] = serde_json::json!("2026-07-28T01:00:00Z");
+    apply(&mut store, own);
+    assert!(!store.buffer(&key("#chat")).unwrap().last_spoke.contains_key("me"));
+}

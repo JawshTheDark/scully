@@ -391,11 +391,7 @@ pub fn line_for(event: &MessageEvent, opts: &RenderOpts) -> Option<Line> {
     };
 
     Some(Line {
-        unix: event
-            .time
-            .as_deref()
-            .and_then(|raw| glib::DateTime::from_iso8601(raw, None).ok())
-            .map(|d| d.to_unix()),
+        unix: event.time.as_deref().and_then(lurker_proto::timeparse::rfc3339_to_unix),
         author: match event.event_type {
             EventType::Message | EventType::Action => event.nick.clone(),
             _ => None,

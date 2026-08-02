@@ -23,6 +23,7 @@ pub mod event;
 pub mod frame;
 pub mod isupport;
 pub mod mirc;
+pub mod timeparse;
 pub mod verb;
 
 pub use consolidate::{consolidate, ConsolidationKind, Summary as ConsolidationSummary};

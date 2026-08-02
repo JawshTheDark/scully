@@ -192,6 +192,15 @@ pub struct ChatWindow {
     row_parity: Cell<u64>,
     /// input.suggestion_strip_on_desktop, cached — read per keystroke.
     strip_on_desktop: Cell<bool>,
+    /// The value behind each pooled suggestion chip, by child index.
+    chip_values: RefCell<Vec<String>>,
+    /// chat.smart_filter_*, cached — read per RENDER, which is per incoming
+    /// message; five registry lookups per message was pure waste.
+    smart_join: Cell<bool>,
+    smart_quit: Cell<bool>,
+    smart_nick: Cell<bool>,
+    smart_delay_secs: Cell<i64>,
+    smart_unmask_secs: Cell<i64>,
     /// Armed after the first Send press on a message that will split
     /// (`chat.allow_split_messages` off): the second press confirms. Cleared
     /// by any edit or buffer switch.
@@ -583,6 +592,12 @@ impl ChatWindow {
             prev_row: RefCell::new(None),
             row_parity: Cell::new(0),
             strip_on_desktop: Cell::new(false),
+            chip_values: RefCell::new(Vec::new()),
+            smart_join: Cell::new(true),
+            smart_quit: Cell::new(true),
+            smart_nick: Cell::new(true),
+            smart_delay_secs: Cell::new(300),
+            smart_unmask_secs: Cell::new(1800),
             pending_split_confirm: Cell::new(false),
             time_fmt: RefCell::new("%H:%M:%S".to_string()),
             paging: Cell::new(false),
@@ -1763,6 +1778,11 @@ impl ChatWindow {
         // `input.show_format_button`: the palette lives in the composer row.
         self.btn_format.set_visible(get_bool("input.show_format_button", false));
         self.strip_on_desktop.set(get_bool("input.suggestion_strip_on_desktop", false));
+        self.smart_join.set(get_bool("chat.smart_filter_join", true));
+        self.smart_quit.set(get_bool("chat.smart_filter_quit", true));
+        self.smart_nick.set(get_bool("chat.smart_filter_nick", true));
+        self.smart_delay_secs.set(get_int("chat.smart_filter_delay", 5).max(0) * 60);
+        self.smart_unmask_secs.set(get_int("chat.smart_filter_join_unmask", 30).max(0) * 60);
         *self.unread_display.borrow_mut() = get_str("look.buffer_list.unread_display", "full");
         self.unread_bold.set(get_bool("look.buffer_list.unread_bold", false));
         self.lag_min_show_ms.set(get_int("look.bar.lag_min_show_ms", 500));
@@ -2623,31 +2643,13 @@ impl ChatWindow {
             self.window.set_title(Some(&format!("{} — Scully", buf.display_name)));
         }
 
-        // §9.3: skip self-events when building "recent speakers".
-        let recent: std::collections::HashSet<String> = buf
-            .events
-            .iter()
-            .filter(|e| !e.is_self && e.event_type.is_chat())
-            .filter_map(|e| e.nick.as_ref().map(|n| n.to_ascii_lowercase()))
-            .collect();
-
-        // When each nick last spoke, unix seconds — the smart tier's clock.
-        // Derived from the ring rather than the server's speakers list; the
-        // ring covers far more than any sane smart_filter_delay window.
-        let last_spoke: std::collections::HashMap<String, i64> = {
-            let mut m = std::collections::HashMap::new();
-            for e in buf.events.iter().filter(|e| !e.is_self && e.event_type.is_chat()) {
-                if let (Some(n), Some(t)) = (e.nick.as_ref(), event_unix(e)) {
-                    let entry = m.entry(n.to_ascii_lowercase()).or_insert(t);
-                    *entry = (*entry).max(t);
-                }
-            }
-            m
-        };
+        // When each nick last spoke — maintained by the store at ingest
+        // (Buffer::last_spoke), so rendering costs zero timestamp parses.
+        let last_spoke = &buf.last_spoke;
         let own_nick = key
             .network_id
             .and_then(|id| store.networks.get(&id))
-            .and_then(|n| n.nick.as_ref().map(|n| n.to_ascii_lowercase()));
+            .and_then(|n| n.nick.as_deref().map(lurker_proto::fold));
 
         // The event-noise tier, resolved client-side (`shared/eventFilter.ts`):
         // `none` hides the noise set entirely; `smart` keeps presence events
@@ -2658,13 +2660,11 @@ impl ChatWindow {
         // revealed retroactively if the joiner speaks within the unmask
         // window AFTER it. Your own events never filter.
         let tier = self.app.event_mode.get();
-        let f_join = self.app.setting("chat.smart_filter_join").as_bool().unwrap_or(true);
-        let f_quit = self.app.setting("chat.smart_filter_quit").as_bool().unwrap_or(true);
-        let f_nick = self.app.setting("chat.smart_filter_nick").as_bool().unwrap_or(true);
-        let delay_secs =
-            self.app.setting("chat.smart_filter_delay").as_i64().unwrap_or(5).max(0) * 60;
-        let unmask_secs =
-            self.app.setting("chat.smart_filter_join_unmask").as_i64().unwrap_or(30).max(0) * 60;
+        let f_join = self.smart_join.get();
+        let f_quit = self.smart_quit.get();
+        let f_nick = self.smart_nick.get();
+        let delay_secs = self.smart_delay_secs.get();
+        let unmask_secs = self.smart_unmask_secs.get();
         let events: Vec<_> = buf
             .events
             .iter()
@@ -2681,7 +2681,9 @@ impl ChatWindow {
                     if !filterable {
                         return true;
                     }
-                    let nick_lc = e.nick.as_ref().map(|n| n.to_ascii_lowercase());
+                    // fold(), matching last_spoke's keys: `Alice[]` and
+                    // `alice{}` are one person under IRC casefold.
+                    let nick_lc = e.nick.as_deref().map(lurker_proto::fold);
                     if nick_lc.is_none() || nick_lc == own_nick {
                         return true;
                     }
@@ -2698,7 +2700,7 @@ impl ChatWindow {
                         }
                         // No timestamp to reason with — the old membership
                         // heuristic is better than hiding blind.
-                        _ => nick_lc.as_ref().is_some_and(|n| recent.contains(n)),
+                        _ => nick_lc.as_ref().is_some_and(|n| last_spoke.contains_key(n)),
                     }
                 }
                 lurker_proto::EventMode::All => true,
@@ -2714,7 +2716,9 @@ impl ChatWindow {
             .unwrap_or(consolidate::DEFAULT_MAX_NAMES);
         let opts = consolidate::Options {
             enabled: self.app.consolidate.get(),
-            recent_speakers: Some(recent.into_iter().collect()),
+            // The store's ingest-time speaker clock doubles as the "who
+            // spoke" set — same rule (chat, not self), zero per-render scans.
+            recent_speakers: Some(last_spoke.keys().cloned().collect()),
             max_names,
         };
         let rows = consolidate::consolidate(&events, &opts);
@@ -4957,8 +4961,8 @@ impl ChatWindow {
                     .iter()
                     .rev()
                     .filter(|e| !e.is_self && e.event_type.is_chat())
-                    .filter_map(|e| e.nick.clone());
-                let members = buf.members.values().map(|m| m.nick.clone());
+                    .filter_map(|e| e.nick.as_deref());
+                let members = buf.members.values().map(|m| m.nick.as_str());
                 crate::input::candidates(&prefix, recent, members, own.as_deref())
             }
         };
@@ -5092,43 +5096,67 @@ impl ChatWindow {
             self.strip_scroll.set_visible(false);
             return;
         }
-        clear_box(&self.suggestion_strip);
         let text = self.entry.text().to_string();
         let cursor = self.entry.position().max(0) as usize;
         let found = self.completion_candidates(&text, cursor);
-        let Some((_anchor, _kind, candidates)) = found else {
-            self.strip_scroll.set_visible(false);
-            return;
+        let candidates = match found {
+            Some((_, _, c)) if !c.is_empty() => c,
+            _ => {
+                self.strip_scroll.set_visible(false);
+                return;
+            }
         };
-        if candidates.is_empty() {
-            self.strip_scroll.set_visible(false);
-            return;
+
+        // A fixed pool of chips, built once: this runs per keystroke, and
+        // destroying + recreating 12 buttons (CSS nodes, signal closures,
+        // relayout) each press is the expensive part of the strip. Chips are
+        // relabelled and shown/hidden; each reads its value by index and
+        // re-derives against the LIVE entry, exactly as Tab would — never a
+        // snapshot (buffer switches with identical text emit no changed
+        // signal to rebuild us).
+        const POOL: usize = 12;
+        if self.suggestion_strip.first_child().is_none() {
+            for i in 0..POOL {
+                let chip = gtk::Button::builder().css_classes(["suggestion-chip"]).build();
+                let this = self.clone_handle();
+                chip.connect_clicked(move |_| {
+                    let Some(this) = this.upgrade() else { return };
+                    let Some(value) = this.chip_values.borrow().get(i).cloned() else {
+                        return;
+                    };
+                    let text = this.entry.text().to_string();
+                    let cursor = this.entry.position().max(0) as usize;
+                    let Some((anchor, kind, _)) = this.completion_candidates(&text, cursor)
+                    else {
+                        return;
+                    };
+                    let (new_text, new_cursor) =
+                        crate::input::complete(&text, cursor, anchor, &value, kind);
+                    this.entry.set_text(&new_text);
+                    this.entry.set_position(new_cursor as i32);
+                    this.entry.grab_focus_without_selecting();
+                });
+                self.suggestion_strip.append(&chip);
+            }
         }
-        for value in candidates.into_iter().take(12) {
-            let chip = gtk::Button::builder()
-                .label(&value)
-                .css_classes(["suggestion-chip"])
-                .build();
-            let this = self.clone_handle();
-            chip.connect_clicked(move |_| {
-                let Some(this) = this.upgrade() else { return };
-                // Re-derive against the LIVE entry, exactly as Tab would: a
-                // chip built from one buffer's state must never rewrite the
-                // composer from a stale snapshot (buffer switches with
-                // identical text emit no changed signal to rebuild us).
-                let text = this.entry.text().to_string();
-                let cursor = this.entry.position().max(0) as usize;
-                let Some((anchor, kind, _)) = this.completion_candidates(&text, cursor)
-                else {
-                    return;
-                };
-                let (new_text, new_cursor) =
-                    crate::input::complete(&text, cursor, anchor, &value, kind);
-                this.entry.set_text(&new_text);
-                this.entry.set_position(new_cursor as i32);
-                this.entry.grab_focus_without_selecting();
-            });
-            self.suggestion_strip.append(&chip);
+
+        let mut values = self.chip_values.borrow_mut();
+        values.clear();
+        values.extend(candidates.into_iter().take(POOL));
+        let mut child = self.suggestion_strip.first_child();
+        let mut i = 0;
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            if let Some(chip) = widget.downcast_ref::<gtk::Button>() {
+                match values.get(i) {
+                    Some(v) => {
+                        chip.set_label(v);
+                        chip.set_visible(true);
+                    }
+                    None => chip.set_visible(false),
+                }
+            }
+            i += 1;
         }
         self.strip_scroll.set_visible(true);
     }
@@ -5514,12 +5542,12 @@ fn pixbuf_has_writer(name: &str) -> bool {
         .any(|f| f.is_writable() && f.name().as_deref() == Some(name))
 }
 
-/// An event's moment as unix seconds, when parseable.
+/// An event's moment as unix seconds, when parseable. Hand-rolled parser —
+/// glib::DateTime dragged locale/timezone machinery into a fixed-format
+/// ASCII string, at ~500 calls per redraw before the last_spoke map moved
+/// into the store.
 fn event_unix(e: &lurker_proto::MessageEvent) -> Option<i64> {
-    e.time
-        .as_deref()
-        .and_then(|raw| glib::DateTime::from_iso8601(raw, None).ok())
-        .map(|d| d.to_unix())
+    e.time.as_deref().and_then(lurker_proto::timeparse::rfc3339_to_unix)
 }
 
 /// Pause and detach the media stream from any player inside `root`, so the

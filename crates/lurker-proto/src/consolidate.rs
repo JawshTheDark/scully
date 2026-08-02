@@ -210,7 +210,9 @@ fn cap(entries: Vec<Entry>, max_names: usize, recent: Option<&HashSet<String>>) 
     }
     let mut ranked = entries;
     ranked.sort_by_key(|e| {
-        let name = e.sort_name().to_ascii_lowercase();
+        // fold(), not ascii-lowercase: the recent set is keyed by IRC
+        // casefold, where `Alice[]` and `alice{}` are the same person.
+        let name = crate::casefold::fold(e.sort_name());
         u8::from(!recent.is_some_and(|r| r.contains(&name)))
     });
     let hidden = ranked.len() - max_names;
@@ -222,7 +224,7 @@ fn consolidate_run(events: &[&MessageEvent], opts: &Options) -> Vec<Group> {
     let recent: Option<HashSet<String>> = opts
         .recent_speakers
         .as_ref()
-        .map(|s| s.iter().map(|n| n.to_ascii_lowercase()).collect());
+        .map(|s| s.iter().map(|n| crate::casefold::fold(n)).collect());
     let max_names = opts.max_names.max(1);
 
     // Insertion order is preserved explicitly rather than by map iteration,

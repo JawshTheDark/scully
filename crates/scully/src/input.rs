@@ -96,19 +96,33 @@ pub fn prefix_at(text: &str, cursor: usize) -> (usize, String) {
 /// Order completion candidates: recent speakers newest-first (the person you
 /// are replying to), then members alphabetically; own nick and self-echoes
 /// excluded; deduped case-insensitively.
-pub fn candidates(
+pub fn candidates<'a>(
     prefix: &str,
-    recent_speakers_newest_first: impl Iterator<Item = String>,
-    members_sorted: impl Iterator<Item = String>,
+    recent_speakers_newest_first: impl Iterator<Item = &'a str>,
+    members_sorted: impl Iterator<Item = &'a str>,
     own_nick: Option<&str>,
 ) -> Vec<String> {
     let own = own_nick.map(|n| n.to_ascii_lowercase());
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for nick in recent_speakers_newest_first.chain(members_sorted) {
+        // Cheap rejection FIRST: this runs per keystroke over every member of
+        // the channel, and the old shape lowercased (allocating) every nick
+        // before testing the prefix — ~2500 allocations per keypress in a big
+        // channel. A byte-length gate plus an ASCII case-insensitive prefix
+        // compare rejects non-matches allocation-free; only survivors fold.
+        if nick.len() < prefix.len() {
+            continue;
+        }
+        let Some(head) = nick.get(..prefix.len()) else {
+            continue; // prefix length lands mid-codepoint: cannot match
+        };
+        if !head.eq_ignore_ascii_case(prefix) {
+            continue;
+        }
         let folded = nick.to_ascii_lowercase();
-        if folded.starts_with(prefix) && Some(&folded) != own.as_ref() && seen.insert(folded) {
-            out.push(nick);
+        if Some(&folded) != own.as_ref() && seen.insert(folded) {
+            out.push(nick.to_string());
         }
     }
     out
@@ -174,14 +188,21 @@ mod tests {
     fn candidates_rank_recent_speakers_before_members_and_skip_self() {
         let got = candidates(
             "a",
-            ["Anna".to_string(), "alfred".to_string()].into_iter(),
-            ["abbot".to_string(), "alfred".to_string(), "anna".to_string(), "amiantos".to_string()]
-                .into_iter(),
+            ["Anna", "alfred"].into_iter(),
+            ["abbot", "alfred", "anna", "amiantos"].into_iter(),
             Some("Abbot"),
         );
         // Anna spoke most recently → first; alfred next; members follow,
         // deduped case-insensitively; own nick (abbot) excluded.
         assert_eq!(got, ["Anna", "alfred", "amiantos"]);
+    }
+
+    #[test]
+    fn candidate_prefix_gate_survives_multibyte_nicks() {
+        // The allocation-free prefix gate slices nicks at prefix.len() BYTES;
+        // a boundary landing mid-codepoint must reject cleanly, not panic.
+        let got = candidates("ab", ["ábc", "abc"].into_iter(), [].into_iter(), None);
+        assert_eq!(got, ["abc"]);
     }
 
     #[test]
