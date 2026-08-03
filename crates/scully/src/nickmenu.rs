@@ -225,11 +225,16 @@ pub fn verbs_for(
                 line: format!("KICK {channel} {nick}"),
             },
         ],
+        // Ignore is GLOBAL by scope and by-identity by mask, matching the
+        // web's defaults (#350 / IgnoreModal): field-reported broken when it
+        // was pinned to the clicked network with a bare-nick mask — ignore a
+        // pest on one network and their messages kept flowing from another,
+        // and a /nick change would have shed the rule entirely. Host-keyed
+        // when we know the host (survives renames), nick!*@* otherwise.
         Cmd::Ignore => vec![ClientVerb::AddIgnore {
-            network_id: Some(network_id),
+            network_id: None,
             rule: serde_json::json!({
-                "mask": nick,
-                "patternKind": "substr",
+                "mask": ban_mask(nick, host),
                 "levels": ["ALL"],
             }),
         }],
@@ -385,13 +390,24 @@ mod tests {
     }
 
     #[test]
-    fn ignore_targets_the_nick_on_this_network_only() {
-        let verbs = verbs_for(Cmd::Ignore, 3, "#chan", "spammer", None);
+    fn ignore_is_global_and_keyed_to_identity() {
+        // The web's defaults (#350): global scope — ignoring a pest on one
+        // network must silence them on all of them (field-reported broken
+        // when this was Some(network)) — and a host mask when the host is
+        // known, so a /nick change doesn't shed the rule.
+        let verbs = verbs_for(Cmd::Ignore, 3, "#chan", "spammer", Some("bad.example.net"));
         let [ClientVerb::AddIgnore { network_id, rule }] = verbs.as_slice() else {
             panic!("expected add-ignore, got {verbs:?}");
         };
-        assert_eq!(*network_id, Some(3), "per-network, not global");
-        assert_eq!(rule["mask"], "spammer");
+        assert_eq!(*network_id, None, "global, not per-network");
+        assert_eq!(rule["mask"], "*!*@bad.example.net");
+
+        // No host known yet: fall back to a nick mask that can't over-match.
+        let verbs = verbs_for(Cmd::Ignore, 3, "#chan", "spammer", None);
+        let [ClientVerb::AddIgnore { rule, .. }] = verbs.as_slice() else {
+            panic!("expected add-ignore, got {verbs:?}");
+        };
+        assert_eq!(rule["mask"], "spammer!*@*");
     }
 
     #[test]
