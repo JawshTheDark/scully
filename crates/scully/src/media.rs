@@ -114,6 +114,9 @@ pub fn is_youtube(url: &str) -> bool {
 pub struct Preview {
     pub title: String,
     pub description: String,
+    /// og:image / twitter:image, absolute URL or empty. Rendered as the
+    /// card's thumbnail through the same image cache inline images use.
+    pub image: String,
 }
 
 impl Preview {
@@ -132,7 +135,19 @@ pub fn extract_preview(html: &str) -> Preview {
             .unwrap_or_default(),
         description: meta_content(html, &["og:description", "twitter:description", "description"])
             .unwrap_or_default(),
+        // Only absolute http(s) images: a relative og:image would need the
+        // page URL to resolve, and a scheme-relative one is ambiguous — both
+        // are rare enough to skip rather than guess.
+        image: meta_content(html, &["og:image", "twitter:image"])
+            .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+            .unwrap_or_default(),
     }
+}
+
+/// Whether a URL is worth an article-card preview: http(s), and not a direct
+/// media file — those get real embeds instead.
+pub fn is_previewable(url: &str) -> bool {
+    (url.starts_with("http://") || url.starts_with("https://")) && classify(url).is_none()
 }
 
 /// Value of the first `<meta ... property|name="<key>" ... content="...">` for
@@ -373,5 +388,43 @@ mod tests {
     fn duplicate_urls_embed_once() {
         let found = media_urls("https://x.example/a.png and again https://x.example/a.png");
         assert_eq!(found.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn cards_extract_title_description_and_thumbnail() {
+        let html = r#"<html><head>
+            <meta property="og:title" content="Ergo IRC daemon">
+            <meta name="og:description" content="A modern ircd.">
+            <meta property="og:image" content="https://example.com/card.png">
+            </head></html>"#;
+        let p = extract_preview(html);
+        assert_eq!(p.title, "Ergo IRC daemon");
+        assert_eq!(p.description, "A modern ircd.");
+        assert_eq!(p.image, "https://example.com/card.png");
+    }
+
+    #[test]
+    fn relative_or_odd_scheme_thumbnails_are_dropped() {
+        // A relative og:image needs the page URL to resolve; guessing wrong
+        // fetches garbage. Skip rather than guess.
+        for src in ["/card.png", "//cdn.example.com/card.png", "data:image/png;base64,x"] {
+            let html = format!(r#"<meta property="og:image" content="{src}">"#);
+            assert_eq!(extract_preview(&html).image, "", "{src}");
+        }
+    }
+
+    #[test]
+    fn previewable_is_http_non_media_only() {
+        assert!(is_previewable("https://ergo.chat/about"));
+        assert!(is_previewable("http://example.com"));
+        assert!(!is_previewable("https://example.com/clip.mp4"), "media gets real embeds");
+        assert!(!is_previewable("https://example.com/pic.jpg"));
+        assert!(!is_previewable("ftp://example.com/file"), "http(s) only");
+        assert!(!is_previewable("mailto:someone@example.com"));
     }
 }

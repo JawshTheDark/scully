@@ -39,8 +39,9 @@ pub struct DeviceSettings {
     pub inline_audio: bool,
     /// Show whois replies in the active buffer instead of only the server log.
     pub whois_in_active_buffer: bool,
-    /// Fetch link previews (YouTube titles/descriptions). Off by default: it
-    /// fetches URLs seen in chat, which is a privacy consideration.
+    /// Fetch link previews — title/description/thumbnail cards for links in
+    /// chat. Off by default: it fetches URLs other people posted, which is a
+    /// privacy consideration a user must opt into.
     pub link_previews: bool,
 }
 
@@ -1072,10 +1073,24 @@ impl App {
             async move {
                 let client = reqwest::Client::builder()
                     .user_agent("Mozilla/5.0 (compatible; Scully/0.1)")
+                    .timeout(std::time::Duration::from_secs(20))
                     .build()
                     .ok()?;
                 let resp = client.get(&fetch_url).send().await.ok()?;
                 if !resp.status().is_success() {
+                    return None;
+                }
+                // HTML only. The gate now admits ANY non-media link, and
+                // without this a URL to a tarball would be downloaded to a
+                // megabyte just to find no <meta> tags in it.
+                let is_html = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|ct| {
+                        ct.starts_with("text/html") || ct.starts_with("application/xhtml")
+                    });
+                if !is_html {
                     return None;
                 }
                 // Scan a bounded prefix for og tags. YouTube front-loads

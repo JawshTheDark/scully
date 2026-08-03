@@ -4364,6 +4364,36 @@ impl ChatWindow {
                         self.insert_with_tags(&indent, &["time"]);
                         self.insert_with_tags(&desc, &["preview-desc"]);
                     }
+                    // Thumbnail (og:image), through the same cache and fetch
+                    // path inline images use — same size cap, same failure
+                    // silence (a card without its picture is still a card).
+                    if !preview.image.is_empty() {
+                        match self.app.images.get(&preview.image) {
+                            Some(texture) => {
+                                let picture = gtk::Picture::for_paintable(&texture);
+                                picture.set_can_shrink(true);
+                                let (w, h) =
+                                    (texture.width() as f64, texture.height() as f64);
+                                let scale = (240.0 / w).min(135.0 / h).min(1.0);
+                                picture.set_size_request(
+                                    (w * scale) as i32,
+                                    (h * scale) as i32,
+                                );
+                                picture.add_css_class("embed");
+                                let mut end = self.text.end_iter();
+                                self.text.insert(&mut end, "\n");
+                                self.insert_with_tags(&indent, &["time"]);
+                                let mut end = self.text.end_iter();
+                                let anchor = self.text.create_child_anchor(&mut end);
+                                self.text_view.add_child_at_anchor(&picture, &anchor);
+                                self.embeds.borrow_mut().push(picture.upcast());
+                            }
+                            None if !self.app.images.is_failed(&preview.image) => {
+                                self.app.fetch_image(preview.image.clone(), key.clone());
+                            }
+                            None => {}
+                        }
+                    }
                 }
                 Some(None) => {} // fetched, nothing usable
                 None => self.app.fetch_preview(url.clone(), key.clone()),
@@ -5601,9 +5631,13 @@ fn clear_list(list: &gtk::ListBox) {
 /// YouTube URLs in a message, for link previews. Returns (url, ()) to mirror
 /// the media_urls shape the caller iterates.
 fn preview_urls(text: &str) -> Vec<(String, ())> {
+    // Any non-media http(s) link earns a card, not just YouTube (field
+    // request). Capped at two per message: a pasted list of ten links must
+    // not become ten fetches and ten cards.
     crate::media::find_links(text)
         .into_iter()
-        .filter(|(_, _, url)| crate::media::is_youtube(url))
+        .filter(|(_, _, url)| crate::media::is_previewable(url))
         .map(|(_, _, url)| (url, ()))
+        .take(2)
         .collect()
 }
