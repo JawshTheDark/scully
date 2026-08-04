@@ -352,6 +352,35 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      # Full history: the notes are built from commits since the previous tag.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: src
+      # Real release notes, not just "Full Changelog: vX...vY". The release
+      # body is also what GitHub serves as og:description, so it is what every
+      # link-preview card (IRC bridges, Scully's own cards) shows for the
+      # release URL — a bare compare-link there reads as an empty release.
+      # The tag's annotation is the headline; the commit subjects since the
+      # previous tag are the bullets. Commit messages here are written to be
+      # readable, so this is cheap to keep good.
+      - name: Compose release notes
+        run: |
+          set -eu
+          cd src
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          {
+            git tag -l --format='%(contents:subject)' "$TAG"
+            echo
+            if [ -n "$PREV" ]; then
+              echo "### Changes since ${PREV}"
+              git log --no-merges --format='- %s' "${PREV}..${TAG}"
+            else
+              git log --no-merges --format='- %s' "$TAG"
+            fi
+          } > ../NOTES.md
+          cat ../NOTES.md
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
@@ -361,5 +390,7 @@ jobs:
           # invisible release, and this repo cuts frequent point releases.
           draft: false
           make_latest: true
+          body_path: NOTES.md
+          # Appends the compare link and contributors under the real notes.
           generate_release_notes: true
           files: artifacts/**/*
