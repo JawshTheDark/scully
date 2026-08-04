@@ -121,6 +121,29 @@ pub fn open(app: &AppRef) {
         mon_radios.push(rb);
     }
 
+    outer.append(
+        &gtk::Label::builder()
+            .label("LAYOUT")
+            .xalign(0.0)
+            .css_classes(["chanctl-heading"])
+            .build(),
+    );
+    let layout_group = gtk::CheckButton::new();
+    let mut layout_radios: Vec<(Layout, gtk::CheckButton)> = Vec::new();
+    for (i, (layout, label)) in [
+        (Layout::Grid, "Grid — as square as possible"),
+        (Layout::Stacked, "Stacked — top to bottom, full width"),
+        (Layout::SideBySide, "Side by side — full height columns"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rb = gtk::CheckButton::builder().label(label).active(i == 0).build();
+        rb.set_group(Some(&layout_group));
+        outer.append(&rb);
+        layout_radios.push((layout, rb));
+    }
+
     let status = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
@@ -156,7 +179,12 @@ pub fn open(app: &AppRef) {
             }
             let mon_idx = mon_radios.iter().position(|r| r.is_active()).unwrap_or(0);
             let geo = monitors[mon_idx].0.geometry();
-            tile_windows(&app, &selected, geo, &status);
+            let layout = layout_radios
+                .iter()
+                .find(|(_, r)| r.is_active())
+                .map(|(l, _)| *l)
+                .unwrap_or(Layout::Grid);
+            tile_windows(&app, &selected, geo, layout);
             window.close();
         });
     }
@@ -179,24 +207,34 @@ pub fn open(app: &AppRef) {
     window.present();
 }
 
-/// Grid dimensions for n windows: as square as possible, columns first —
-/// the shape every tiling convention converges on.
-pub fn grid_for(n: usize) -> (usize, usize) {
+/// How the cells divide the display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    /// As square as possible — the shape tiling conventions converge on.
+    Grid,
+    /// One full-width column, windows stacked top to bottom.
+    Stacked,
+    /// One full-height row, windows side by side.
+    SideBySide,
+}
+
+/// Cell dimensions for n windows under a layout.
+pub fn dims_for(n: usize, layout: Layout) -> (usize, usize) {
     if n == 0 {
         return (0, 0);
     }
-    let cols = (n as f64).sqrt().ceil() as usize;
-    let rows = n.div_ceil(cols);
-    (cols, rows)
+    match layout {
+        Layout::Grid => {
+            let cols = (n as f64).sqrt().ceil() as usize;
+            (cols, n.div_ceil(cols))
+        }
+        Layout::Stacked => (1, n),
+        Layout::SideBySide => (n, 1),
+    }
 }
 
-fn tile_windows(
-    app: &AppRef,
-    keys: &[BufferKey],
-    geo: gtk::gdk::Rectangle,
-    _status: &gtk::Label,
-) {
-    let (cols, rows) = grid_for(keys.len());
+fn tile_windows(app: &AppRef, keys: &[BufferKey], geo: gtk::gdk::Rectangle, layout: Layout) {
+    let (cols, rows) = dims_for(keys.len(), layout);
     let cell_w = geo.width() / cols as i32;
     let cell_h = geo.height() / rows as i32;
 
@@ -319,15 +357,23 @@ mod tests {
 
     #[test]
     fn grids_stay_as_square_as_possible() {
-        assert_eq!(grid_for(1), (1, 1));
-        assert_eq!(grid_for(2), (2, 1));
-        assert_eq!(grid_for(3), (2, 2));
-        assert_eq!(grid_for(4), (2, 2));
-        assert_eq!(grid_for(5), (3, 2));
-        assert_eq!(grid_for(6), (3, 2));
-        assert_eq!(grid_for(7), (3, 3));
-        assert_eq!(grid_for(9), (3, 3));
-        assert_eq!(grid_for(10), (4, 3));
-        assert_eq!(grid_for(0), (0, 0));
+        let g = |n| dims_for(n, Layout::Grid);
+        assert_eq!(g(1), (1, 1));
+        assert_eq!(g(2), (2, 1));
+        assert_eq!(g(3), (2, 2));
+        assert_eq!(g(4), (2, 2));
+        assert_eq!(g(5), (3, 2));
+        assert_eq!(g(6), (3, 2));
+        assert_eq!(g(7), (3, 3));
+        assert_eq!(g(9), (3, 3));
+        assert_eq!(g(10), (4, 3));
+        assert_eq!(g(0), (0, 0));
+    }
+
+    #[test]
+    fn stacked_and_side_by_side_are_single_file() {
+        assert_eq!(dims_for(3, Layout::Stacked), (1, 3), "full width, top to bottom");
+        assert_eq!(dims_for(3, Layout::SideBySide), (3, 1), "full height columns");
+        assert_eq!(dims_for(0, Layout::Stacked), (0, 0));
     }
 }
