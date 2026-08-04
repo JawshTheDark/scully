@@ -161,6 +161,10 @@ pub fn open(app: &AppRef) {
         });
     }
 
+    // The line whose absence shipped an empty window: the contents box was
+    // built, filled, and never attached.
+    window.set_child(Some(&outer));
+
     let controller = gtk::EventControllerKey::new();
     let esc = window.clone();
     controller.connect_key_pressed(move |_, key, _, _| {
