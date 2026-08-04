@@ -73,6 +73,7 @@ pub struct ChatWindow {
     btn_addnet: gtk::Button,
     btn_search: gtk::Button,
     btn_popout: gtk::Button,
+    btn_tile: gtk::Button,
     btn_read: gtk::Button,
     btn_settings: gtk::Button,
     /// Voice-call affordances. Built unconditionally and shown only once the
@@ -335,6 +336,7 @@ impl ChatWindow {
         let btn_addnet = tool("list-add-symbolic", "Add a network");
         let btn_search = tool("system-search-symbolic", "Search messages (Ctrl+F)");
         let btn_popout = tool("window-new-symbolic", "Pop this channel out into its own window");
+        let btn_tile = tool("view-grid-symbolic", "Tile channels across a display");
         let btn_read = tool("object-select-symbolic", "Mark everything read");
         let btn_settings = tool("emblem-system-symbolic", "Settings");
         // Hidden until `voiceEnabled` arrives — see refresh_voice_ui.
@@ -346,6 +348,7 @@ impl ChatWindow {
         sidebar_header.append(&btn_search);
         sidebar_header.append(&btn_call);
         sidebar_header.append(&btn_popout);
+        sidebar_header.append(&btn_tile);
         sidebar_header.append(&btn_read);
         sidebar_header.append(&btn_settings);
 
@@ -538,6 +541,7 @@ impl ChatWindow {
             btn_addnet,
             btn_search,
             btn_popout,
+            btn_tile,
             btn_read,
             btn_settings,
             overlay,
@@ -655,6 +659,11 @@ impl ChatWindow {
             .borrow()
             .first()
             .is_some_and(|w| w.observer_id.get() == self.observer_id.get())
+    }
+
+    /// The underlying GTK window — the tiler sizes popouts through this.
+    pub fn gtk_window(&self) -> &gtk::ApplicationWindow {
+        &self.window
     }
 
     /// The buffer this window is pinned to, if it is a popout.
@@ -1246,6 +1255,9 @@ impl ChatWindow {
         self.btn_search.connect_clicked(move |_| this.open_search(false));
 
         let this = self.clone();
+        self.btn_tile.connect_clicked(move |_| crate::tiledialog::open(&this.app));
+
+        let this = self.clone();
         self.btn_popout.connect_clicked(move |_| {
             let Some(key) = this.active.borrow().clone() else { return };
             crate::open_popout(&this.app, key);
@@ -1704,6 +1716,7 @@ impl ChatWindow {
             &self.btn_search,
             &self.btn_call,
             &self.btn_popout,
+            &self.btn_tile,
             &self.btn_read,
             &self.btn_settings,
         ];

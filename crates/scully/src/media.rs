@@ -94,20 +94,6 @@ pub fn find_links(text: &str) -> Vec<(usize, usize, String)> {
     out
 }
 
-/// True for a YouTube watch/short URL — the only hosts link previews fetch,
-/// keeping the privacy surface (fetching URLs seen in chat) tightly bounded.
-pub fn is_youtube(url: &str) -> bool {
-    let host = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url)
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .trim_start_matches("www.")
-        .trim_start_matches("m.");
-    matches!(host, "youtube.com" | "youtu.be")
-}
 
 /// A fetched link preview: Open Graph title and description.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -345,14 +331,6 @@ mod tests {
         assert!(find_links("emailhttps://nope.com").is_empty(), "must start at a boundary");
     }
 
-    #[test]
-    fn detects_youtube_hosts_only() {
-        assert!(is_youtube("https://www.youtube.com/watch?v=abc"));
-        assert!(is_youtube("https://youtu.be/abc"));
-        assert!(is_youtube("http://m.youtube.com/watch?v=x"));
-        assert!(!is_youtube("https://example.com/watch?v=abc"));
-        assert!(!is_youtube("https://notyoutube.com/x"));
-    }
 
     #[test]
     fn extracts_open_graph_title_and_description() {

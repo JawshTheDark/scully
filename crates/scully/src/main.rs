@@ -30,6 +30,7 @@ mod networkdialog;
 mod nickmenu;
 mod paths;
 mod settings;
+mod tiledialog;
 mod split;
 mod uploadersdialog;
 mod theme;
