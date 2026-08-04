@@ -280,6 +280,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn two_digits_must_be_read_when_available() {
+        // Spec MUST (modern.ircdocs.horse): "\x03123" is colour 12 followed
+        // by literal "3", never colour 1 followed by "23".
+        let segs = parse("\u{03}123");
+        assert_eq!(segs[0].style.fg, Some(12));
+        assert_eq!(segs[0].text, "3");
+    }
+
+    #[test]
     fn plain_text_is_one_segment_and_survives_untouched() {
         let segs = parse("hello world");
         assert_eq!(segs.len(), 1);
