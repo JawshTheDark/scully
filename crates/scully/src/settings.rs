@@ -59,6 +59,33 @@ fn prettify(id: &str) -> String {
     out
 }
 
+/// The last `max` bytes of the log, aligned to the first complete line — the
+/// end is where the crash is. Missing or unreadable log reads as a note, not
+/// an error: a debug report from a machine with no log yet is still a report.
+fn read_log_tail(path: &std::path::Path, max: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return "(no log file)".to_string();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if len > max {
+        let _ = f.seek(SeekFrom::Start(len - max));
+    }
+    let mut buf = String::new();
+    if f.read_to_string(&mut buf).is_err() {
+        // A seek into the middle of a multibyte char makes read_to_string
+        // fail; re-read lossily rather than give up.
+        let _ = f.seek(SeekFrom::Start(if len > max { len - max } else { 0 }));
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut f, &mut bytes);
+        buf = String::from_utf8_lossy(&bytes).into_owned();
+    }
+    match buf.find('\n') {
+        Some(i) if len > max => buf[i + 1..].to_string(),
+        _ => buf,
+    }
+}
+
 /// Synthetic category id for device-local settings.
 const DEVICE_CATEGORY: &str = "__device";
 /// Synthetic category id for the About/debug page.
@@ -309,21 +336,87 @@ impl SettingsWindow {
             self.pane.append(&row);
         }
 
-        let copy = gtk::Button::builder()
-            .label("Copy debug info")
-            .halign(gtk::Align::Start)
-            .css_classes(["toolbtn"])
-            .build();
         let block: String = rows
             .iter()
             .map(|(l, v)| format!("{l}: {v}"))
             .collect::<Vec<_>>()
             .join("\n");
-        copy.connect_clicked(move |btn| {
-            btn.clipboard().set_text(&block);
-            btn.set_label("Copied");
-        });
-        self.pane.append(&copy);
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+
+        let copy = gtk::Button::builder()
+            .label("Copy debug info")
+            .halign(gtk::Align::Start)
+            .css_classes(["toolbtn"])
+            .build();
+        {
+            let block = block.clone();
+            copy.connect_clicked(move |btn| {
+                btn.clipboard().set_text(&block);
+                btn.set_label("Copied");
+            });
+        }
+        buttons.append(&copy);
+
+        // One press: debug block + the log tail, through the account's own
+        // uploader (whatever /uploads selected — their Zipline, catbox, the
+        // instance default), URL straight to the clipboard. "Send me your
+        // debug info" becomes pasting one link.
+        let upload = gtk::Button::builder()
+            .label("Upload debug report")
+            .tooltip_text(
+                "Bundles this info plus the recent log and uploads it via your \
+                 configured uploader; the link lands on your clipboard.",
+            )
+            .css_classes(["toolbtn"])
+            .build();
+        let result_label = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .selectable(true)
+            .css_classes(["settings-desc"])
+            .build();
+        {
+            let app = self.app.clone();
+            let log_path = log_path.clone();
+            let result_label = result_label.clone();
+            upload.connect_clicked(move |btn| {
+                // Log tail read at CLICK time, not page-build time — the
+                // interesting lines are usually the most recent ones.
+                let tail = read_log_tail(&log_path, 256 * 1024);
+                let report = format!(
+                    "== Scully debug report ==\n{block}\n\n== log tail ==\n{tail}"
+                );
+                btn.set_sensitive(false);
+                btn.set_label("Uploading…");
+                let btn = btn.clone();
+                let result_label = result_label.clone();
+                app.upload(
+                    format!("scully-debug-{}.txt", env!("CARGO_PKG_VERSION")),
+                    "text/plain".to_string(),
+                    report.into_bytes(),
+                    move |result| {
+                        btn.set_sensitive(true);
+                        match result {
+                            Ok(url) => {
+                                btn.set_label("Uploaded — link copied");
+                                btn.clipboard().set_text(&url);
+                                result_label.set_text(&url);
+                            }
+                            Err(e) => {
+                                btn.set_label("Upload debug report");
+                                result_label.set_text(&format!("upload failed: {e}"));
+                            }
+                        }
+                    },
+                );
+            });
+        }
+        buttons.append(&upload);
+
+        self.pane.append(&buttons);
+        self.pane.append(&result_label);
     }
 
     /// Device-local preferences: not server-synced, stored in
