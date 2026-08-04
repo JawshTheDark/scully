@@ -4395,6 +4395,12 @@ impl ChatWindow {
                                 .wrap_mode(gtk::pango::WrapMode::WordChar)
                                 .lines(2)
                                 .ellipsize(gtk::pango::EllipsizeMode::End)
+                                // width_chars is the MINIMUM. Without it a
+                                // wrapping label's minimum is ~one char, and
+                                // a TextView anchor allocates minimum — the
+                                // card crushed into a one-letter-wide column
+                                // (field screenshot: "R- e… S- u…").
+                                .width_chars(36)
                                 .max_width_chars(48)
                                 .css_classes(["preview-card-title"])
                                 .build(),
@@ -4410,6 +4416,7 @@ impl ChatWindow {
                                 .wrap_mode(gtk::pango::WrapMode::WordChar)
                                 .lines(2)
                                 .ellipsize(gtk::pango::EllipsizeMode::End)
+                                .width_chars(36)
                                 .max_width_chars(56)
                                 .css_classes(["preview-card-desc"])
                                 .build(),
