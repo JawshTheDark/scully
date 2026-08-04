@@ -31,6 +31,7 @@ fn category_label(id: &str) -> String {
         "notifications" => "Notifications".into(),
         "away" => "Away".into(),
         DEVICE_CATEGORY => device_label(),
+        ABOUT_CATEGORY => "About".into(),
         other => prettify(other),
     }
 }
@@ -60,6 +61,8 @@ fn prettify(id: &str) -> String {
 
 /// Synthetic category id for device-local settings.
 const DEVICE_CATEGORY: &str = "__device";
+/// Synthetic category id for the About/debug page.
+const ABOUT_CATEGORY: &str = "__about";
 
 pub struct SettingsWindow {
     app: AppRef,
@@ -166,6 +169,8 @@ impl SettingsWindow {
                 seen.push(opt.category.clone());
             }
         }
+        // About trails everything: it is information, not preference.
+        seen.push(ABOUT_CATEGORY.to_string());
         for cat in &seen {
             let label = gtk::Label::builder()
                 .xalign(0.0)
@@ -195,6 +200,10 @@ impl SettingsWindow {
         }
         if category == DEVICE_CATEGORY {
             self.populate_device();
+            return;
+        }
+        if category == ABOUT_CATEGORY {
+            self.populate_about();
             return;
         }
 
@@ -227,6 +236,94 @@ impl SettingsWindow {
             }
             self.pane.append(&self.build_row(opt));
         }
+    }
+
+    /// The About page: version, build and environment facts, and a one-click
+    /// copy of the whole block — the answer to "send me your debug info" in
+    /// a bug report, without asking anyone to transcribe from a screenshot.
+    fn populate_about(&self) {
+        let heading = gtk::Label::builder()
+            .xalign(0.0)
+            .label("Scully")
+            .css_classes(["settings-group"])
+            .build();
+        self.pane.append(&heading);
+
+        let conn = self.app.conn.borrow().to_string();
+        let server = self
+            .app
+            .rest
+            .borrow()
+            .as_ref()
+            .map(|r| r.base().to_string())
+            .unwrap_or_else(|| "(not connected)".into());
+        let log_path = crate::paths::data_dir().join("scully.log");
+
+        let rows: Vec<(&str, String)> = vec![
+            ("Version", env!("CARGO_PKG_VERSION").to_string()),
+            (
+                "Build",
+                format!(
+                    "{}{}",
+                    if cfg!(debug_assertions) { "debug" } else { "release" },
+                    if cfg!(feature = "voice") { ", voice" } else { ", no voice" },
+                ),
+            ),
+            (
+                "GTK",
+                format!("{}.{}.{}", gtk::major_version(), gtk::minor_version(), gtk::micro_version()),
+            ),
+            ("Platform", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)),
+            (
+                "Device class",
+                if crate::is_mobile_class() { "phone".into() } else { "desktop".into() },
+            ),
+            ("Server", server),
+            ("Connection", conn),
+            ("Log file", log_path.display().to_string()),
+            ("Config dir", crate::paths::config_dir().display().to_string()),
+        ];
+
+        for (label, value) in &rows {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            row.add_css_class("settings-row");
+            row.append(
+                &gtk::Label::builder()
+                    .xalign(0.0)
+                    .label(*label)
+                    .width_chars(12)
+                    .css_classes(["settings-label"])
+                    .build(),
+            );
+            row.append(
+                &gtk::Label::builder()
+                    .xalign(0.0)
+                    .label(value)
+                    .hexpand(true)
+                    .wrap(true)
+                    .wrap_mode(gtk::pango::WrapMode::WordChar)
+                    .selectable(true)
+                    .css_classes(["settings-desc"])
+                    .build(),
+            );
+            self.pane.append(&row);
+        }
+
+        let copy = gtk::Button::builder()
+            .label("Copy debug info")
+            .halign(gtk::Align::Start)
+            .css_classes(["toolbtn"])
+            .build();
+        let block: String = rows
+            .iter()
+            .map(|(l, v)| format!("{l}: {v}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        copy.connect_clicked(move |btn| {
+            btn.clipboard().set_text(&block);
+            btn.set_label("Copied");
+        });
+        self.pane.append(&copy);
     }
 
     /// Device-local preferences: not server-synced, stored in
@@ -267,8 +364,8 @@ impl SettingsWindow {
                 |d, v| d.whois_in_active_buffer = v,
             ),
             (
-                "Fetch YouTube link previews",
-                "Shows the title and description under YouTube links. Off by default: it fetches pages linked in chat.",
+                "Fetch link previews",
+                "Links get a card with the page's title, description and thumbnail. Off by default: it fetches pages other people linked in chat.",
                 |d| d.link_previews,
                 |d, v| d.link_previews = v,
             ),
