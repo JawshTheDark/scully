@@ -629,3 +629,28 @@ button.embed-poster:hover {
 .friend-dot.away    { color: @warn; }
 .friend-dot.offline { color: @bad; }
 .friend-dot.unknown { color: @fg_muted; }
+
+/* Link-preview card: one bordered object, accent-edged like a quote, instead
+   of floating text lines that blended into the conversation. */
+.preview-card {
+  background-color: @bg_soft;
+  border: 1px solid @border;
+  border-left: 3px solid @accent;
+  border-radius: 3px;
+  padding: 8px 12px;
+  margin: 2px 0;
+}
+
+.preview-card:hover {
+  border-color: @accent;
+}
+
+.preview-card-title {
+  color: @fg;
+  font-weight: 700;
+}
+
+.preview-card-desc {
+  color: @fg_muted;
+  font-size: 9.5pt;
+}

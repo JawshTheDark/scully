@@ -753,8 +753,6 @@ impl ChatWindow {
             .foreground("#82aaff")
             .underline(gtk::pango::Underline::Single)
             .build());
-        add(gtk::TextTag::builder().name("preview-title").foreground("#c3e88d").weight(600).build());
-        add(gtk::TextTag::builder().name("preview-desc").foreground("#8f8f9f").build());
 
         self.retint_nick_tags();
     }
@@ -4351,22 +4349,19 @@ impl ChatWindow {
             let cached = self.app.previews.borrow().get(&url).cloned();
             match cached {
                 Some(Some(preview)) => {
-                    let indent = " ".repeat(self.text_column());
-                    if !preview.title.is_empty() {
-                        self.text.insert(&mut self.text.end_iter(), "\n");
-                        self.insert_with_tags(&indent, &["time"]);
-                        self.insert_with_tags(&format!("▶ {}", preview.title), &["preview-title"]);
-                    }
-                    if !preview.description.is_empty() {
-                        // One trimmed line of description.
-                        let desc: String = preview.description.chars().take(200).collect();
-                        self.text.insert(&mut self.text.end_iter(), "\n");
-                        self.insert_with_tags(&indent, &["time"]);
-                        self.insert_with_tags(&desc, &["preview-desc"]);
-                    }
+                    // One CARD, not floating text lines: bordered, accent-
+                    // edged, thumbnail beside title — visually separate from
+                    // the conversation (field report: the text-line version
+                    // was "kinda hard to parse") and clickable as one object.
+                    let card = gtk::Box::builder()
+                        .orientation(gtk::Orientation::Horizontal)
+                        .spacing(10)
+                        .css_classes(["preview-card"])
+                        .build();
+
                     // Thumbnail (og:image), through the same cache and fetch
-                    // path inline images use — same size cap, same failure
-                    // silence (a card without its picture is still a card).
+                    // path inline images use. A card without its picture is
+                    // still a card; when the fetch lands, the rerender adds it.
                     if !preview.image.is_empty() {
                         match self.app.images.get(&preview.image) {
                             Some(texture) => {
@@ -4374,19 +4369,13 @@ impl ChatWindow {
                                 picture.set_can_shrink(true);
                                 let (w, h) =
                                     (texture.width() as f64, texture.height() as f64);
-                                let scale = (240.0 / w).min(135.0 / h).min(1.0);
+                                let scale = (96.0 / w).min(72.0 / h).min(1.0);
                                 picture.set_size_request(
                                     (w * scale) as i32,
                                     (h * scale) as i32,
                                 );
-                                picture.add_css_class("embed");
-                                let mut end = self.text.end_iter();
-                                self.text.insert(&mut end, "\n");
-                                self.insert_with_tags(&indent, &["time"]);
-                                let mut end = self.text.end_iter();
-                                let anchor = self.text.create_child_anchor(&mut end);
-                                self.text_view.add_child_at_anchor(&picture, &anchor);
-                                self.embeds.borrow_mut().push(picture.upcast());
+                                picture.set_valign(gtk::Align::Center);
+                                card.append(&picture);
                             }
                             None if !self.app.images.is_failed(&preview.image) => {
                                 self.app.fetch_image(preview.image.clone(), key.clone());
@@ -4394,6 +4383,61 @@ impl ChatWindow {
                             None => {}
                         }
                     }
+
+                    let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                    col.set_valign(gtk::Align::Center);
+                    if !preview.title.is_empty() {
+                        col.append(
+                            &gtk::Label::builder()
+                                .xalign(0.0)
+                                .label(&preview.title)
+                                .wrap(true)
+                                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                                .lines(2)
+                                .ellipsize(gtk::pango::EllipsizeMode::End)
+                                .max_width_chars(48)
+                                .css_classes(["preview-card-title"])
+                                .build(),
+                        );
+                    }
+                    if !preview.description.is_empty() {
+                        let desc: String = preview.description.chars().take(220).collect();
+                        col.append(
+                            &gtk::Label::builder()
+                                .xalign(0.0)
+                                .label(desc)
+                                .wrap(true)
+                                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                                .lines(2)
+                                .ellipsize(gtk::pango::EllipsizeMode::End)
+                                .max_width_chars(56)
+                                .css_classes(["preview-card-desc"])
+                                .build(),
+                        );
+                    }
+                    card.append(&col);
+
+                    // The whole card opens the link — it IS the link,
+                    // restated legibly.
+                    card.set_cursor_from_name(Some("pointer"));
+                    card.set_tooltip_text(Some(&url));
+                    let click = gtk::GestureClick::builder().button(1).build();
+                    let weak = self.clone_handle();
+                    let target = url.clone();
+                    click.connect_released(move |_, _, _, _| {
+                        if let Some(this) = weak.upgrade() {
+                            this.open_url(&target);
+                        }
+                    });
+                    card.add_controller(click);
+
+                    let mut end = self.text.end_iter();
+                    self.text.insert(&mut end, "\n");
+                    self.insert_with_tags(&" ".repeat(self.text_column()), &["time"]);
+                    let mut end = self.text.end_iter();
+                    let anchor = self.text.create_child_anchor(&mut end);
+                    self.text_view.add_child_at_anchor(&card, &anchor);
+                    self.embeds.borrow_mut().push(card.upcast());
                 }
                 Some(None) => {} // fetched, nothing usable
                 None => self.app.fetch_preview(url.clone(), key.clone()),
