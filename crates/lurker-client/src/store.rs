@@ -71,6 +71,9 @@ pub enum StoreEvent {
     CallPresenceChanged(BufferKey),
     /// The friends list changed (added, edited, removed, or a fresh snapshot).
     ContactsChanged,
+    /// The favorites list changed (upstream #721 model) — FRIENDS/FAVORITES
+    /// sections re-render.
+    FavoritesChanged,
     /// A tracked peer's online/away state changed on this network, so any
     /// friend row showing it should be recomputed.
     PresenceChanged(i64),
@@ -296,8 +299,17 @@ pub struct Store {
     /// on a channel whose buffer isn't materialised yet.
     call_counts: HashMap<BufferKey, u32>,
 
-    /// Friends, by server-assigned contact id.
+    /// Friends, by server-assigned contact id. LEGACY: upstream #720 removed
+    /// contacts in favor of buffer favorites; kept so Scully still renders
+    /// FRIENDS against a pre-#720 server. A server that speaks favorites
+    /// never sends these.
     contacts: BTreeMap<i64, Contact>,
+
+    /// Favorited buffers in the user's global order (upstream #721).
+    favorites: Vec<lurker_proto::FavoriteEntry>,
+    /// True once a favorites-changed frame arrived — the server speaks the
+    /// new model, even if the list is empty.
+    favorites_seeded: bool,
 
     /// Peer online state, keyed by network and **folded** nick. Fed by both the
     /// snapshot's `peerPresence` map and live `peer-presence` events; the two
@@ -333,6 +345,27 @@ impl Store {
     /// there is no call (Lurker #680).
     pub fn call_count(&self, key: &BufferKey) -> u32 {
         self.call_counts.get(key).copied().unwrap_or(0)
+    }
+
+    /// Whether the server speaks the favorites model (upstream #721). When it
+    /// does, FRIENDS/FAVORITES render from favorites and the legacy contacts
+    /// surface is dead weight the server never feeds.
+    pub fn favorites_model(&self) -> bool {
+        self.favorites_seeded
+    }
+
+    /// Favorited buffers in the user's global order.
+    pub fn favorites(&self) -> &[lurker_proto::FavoriteEntry] {
+        &self.favorites
+    }
+
+    /// Whether this buffer is favorited — favorited buffers render in their
+    /// FRIENDS/FAVORITES section instead of their network group.
+    pub fn is_favorite(&self, key: &BufferKey) -> bool {
+        let Some(net) = key.network_id else { return false };
+        self.favorites
+            .iter()
+            .any(|f| f.network_id == net && lurker_proto::fold(&f.target) == key.target)
     }
 
     /// The friends list, case-insensitively alphabetical by display name.
@@ -625,6 +658,14 @@ impl Store {
                     out.push(StoreEvent::CallPresenceChanged(key));
                 }
             }
+            ServerFrame::FavoritesChanged { favorites } => {
+                self.favorites = favorites;
+                self.favorites_seeded = true;
+                out.push(StoreEvent::FavoritesChanged);
+                // Placement changed for every favorited buffer, so the list
+                // as a whole re-renders.
+                out.push(StoreEvent::BufferListChanged);
+            }
             ServerFrame::ContactsSnapshot { contacts } => {
                 self.contacts = contacts.into_iter().map(|c| (c.id, c)).collect();
                 out.push(StoreEvent::ContactsChanged);
@@ -781,7 +822,18 @@ impl Store {
                 // (a fresh connect hydrates presence without any transition).
                 // Only friends who asked get the event.
                 if event.came_online == Some(true) {
-                    if let Some(c) = self.contact_for(net, nick).filter(|c| c.notify_online) {
+                    // Favorites model (#725): the gate is simply "peer of a
+                    // favorited DM". Legacy contacts keep their per-contact
+                    // notify flag.
+                    let folded = lurker_proto::fold(nick);
+                    let favorite_dm = self.favorites.iter().any(|f| {
+                        f.network_id == net && lurker_proto::fold(&f.target) == folded
+                    });
+                    if favorite_dm {
+                        out.push(StoreEvent::FriendCameOnline(nick.clone()));
+                    } else if let Some(c) =
+                        self.contact_for(net, nick).filter(|c| c.notify_online)
+                    {
                         out.push(StoreEvent::FriendCameOnline(c.display_name.clone()));
                     }
                 }

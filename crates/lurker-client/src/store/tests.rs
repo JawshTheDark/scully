@@ -1040,3 +1040,58 @@ fn last_spoke_is_maintained_at_ingest_and_survives_eviction() {
     apply(&mut store, own);
     assert!(!store.buffer(&key("#chat")).unwrap().last_spoke.contains_key("me"));
 }
+
+// ── Buffer favorites (upstream #721/#725, the contacts successor) ─────────
+
+#[test]
+fn favorites_seed_split_and_dedupe() {
+    let mut store = connected_store();
+    let out = apply(
+        &mut store,
+        json!({ "kind": "favorites-changed", "favorites": [
+            { "networkId": 1, "target": "AmIaNtOs", "bufferId": 10 },
+            { "networkId": 1, "target": "#lurker", "bufferId": 11 }
+        ]}),
+    );
+    assert!(out.iter().any(|e| matches!(e, StoreEvent::FavoritesChanged)));
+    assert!(store.favorites_model());
+    assert_eq!(store.favorites().len(), 2);
+    // Folded match either casing: the favorited DM hides from other sections.
+    assert!(store.is_favorite(&key("amiantos")));
+    assert!(store.is_favorite(&key("#lurker")));
+    assert!(!store.is_favorite(&key("#other")));
+}
+
+#[test]
+fn an_empty_favorites_frame_still_marks_the_model() {
+    // A new server with no favorites yet must not fall back to rendering
+    // legacy contacts UI affordances — the frame's presence IS the signal.
+    let mut store = connected_store();
+    apply(&mut store, json!({ "kind": "favorites-changed", "favorites": [] }));
+    assert!(store.favorites_model());
+    assert!(store.favorites().is_empty());
+}
+
+#[test]
+fn favorite_dm_peer_coming_online_fires_without_any_contact() {
+    // #725: the notify gate is "peer of a favorited DM" — no per-friend flag.
+    let mut store = connected_store();
+    apply(
+        &mut store,
+        json!({ "kind": "favorites-changed", "favorites": [
+            { "networkId": 1, "target": "amiantos", "bufferId": 10 }
+        ]}),
+    );
+    let mut ev = presence_event(1, "AmIaNtOs", "online");
+    ev["cameOnline"] = serde_json::Value::Bool(true);
+    let out = apply(&mut store, ev);
+    assert!(out
+        .iter()
+        .any(|e| matches!(e, StoreEvent::FriendCameOnline(n) if n == "AmIaNtOs")));
+
+    // A non-favorited peer stays silent.
+    let mut ev = presence_event(1, "stranger", "online");
+    ev["cameOnline"] = serde_json::Value::Bool(true);
+    let out = apply(&mut store, ev);
+    assert!(!out.iter().any(|e| matches!(e, StoreEvent::FriendCameOnline(_))));
+}

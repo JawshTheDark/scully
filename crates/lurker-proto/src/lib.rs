@@ -29,7 +29,7 @@ pub mod verb;
 pub use consolidate::{consolidate, ConsolidationKind, Summary as ConsolidationSummary};
 pub use casefold::{fold, is_channel, is_sentinel, BufferKey, SERVER_TARGET, SYSTEM_TARGET};
 pub use event::{EventType, Member, MessageEvent};
-pub use frame::{ChanlistRow, Contact, ContactTarget, 
+pub use frame::{ChanlistRow, Contact, ContactTarget, FavoriteEntry, 
     AwayState, BacklogFrame, BacklogMode, HistoryFrame, HistoryMode, NetworkSnapshot, NetworkState,
     PeerPresence, ReadState, ServerFrame, SnapshotChannel, SnapshotFrame,
 };

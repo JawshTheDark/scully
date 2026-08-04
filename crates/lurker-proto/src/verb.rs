@@ -250,6 +250,13 @@ pub enum ClientVerb {
     },
     #[serde(rename_all = "camelCase")]
     DeleteContact { contact_id: i64 },
+    /// Favorite a buffer (upstream #721). Requires an OPEN buffer server-side;
+    /// callers favoriting a DM that may not exist send `open-buffer` first on
+    /// the same socket, which guarantees ordering.
+    #[serde(rename_all = "camelCase")]
+    FavoriteBuffer { network_id: i64, target: String },
+    #[serde(rename_all = "camelCase")]
+    UnfavoriteBuffer { network_id: i64, target: String },
     #[serde(rename_all = "camelCase")]
     ListChannels { network_id: i64 },
     #[serde(rename_all = "camelCase")]
@@ -420,6 +427,16 @@ mod tests {
         });
         assert_eq!(edit["contactId"], 7);
         assert_eq!(json(&ClientVerb::DeleteContact { contact_id: 7 })["type"], "delete-contact");
+    }
+
+    #[test]
+    fn favorite_verbs_use_kebab_names_and_camel_fields() {
+        let v = json(&ClientVerb::FavoriteBuffer { network_id: 2, target: "amiantos".into() });
+        assert_eq!(v["type"], "favorite-buffer");
+        assert_eq!(v["networkId"], 2);
+        assert_eq!(v["target"], "amiantos");
+        let v = json(&ClientVerb::UnfavoriteBuffer { network_id: 2, target: "#chat".into() });
+        assert_eq!(v["type"], "unfavorite-buffer");
     }
 
     #[test]

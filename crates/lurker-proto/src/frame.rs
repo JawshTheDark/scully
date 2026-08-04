@@ -78,6 +78,20 @@ impl Contact {
     }
 }
 
+/// One favorited buffer (upstream #721): the successor to contacts. The
+/// global, user-ordered favorites list splits by buffer kind in the client —
+/// DMs render under FRIENDS, channels under FAVORITES.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteEntry {
+    #[serde(default)]
+    pub network_id: i64,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub buffer_id: i64,
+}
+
 /// One channel in a `chanlist-result` page.
 ///
 /// Deliberately NOT `rename_all = "camelCase"`: the server builds these rows by
@@ -358,6 +372,12 @@ pub enum ServerFrame {
     DraftSnapshot {
         #[serde(default)]
         drafts: serde_json::Value,
+    },
+    /// The full favorites list, seeded at connect and re-sent on every
+    /// favorite/unfavorite/reorder — one handler covers all of them.
+    FavoritesChanged {
+        #[serde(default, deserialize_with = "lenient")]
+        favorites: Vec<FavoriteEntry>,
     },
     #[serde(rename = "contacts-snapshot")]
     #[serde(rename_all = "camelCase")]

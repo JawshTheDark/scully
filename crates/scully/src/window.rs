@@ -1454,7 +1454,9 @@ impl ChatWindow {
             match event {
                 // Both change what the FRIENDS section shows: who is in it, and
                 // which of them is reachable (which also sets the header dot).
-                StoreEvent::ContactsChanged | StoreEvent::PresenceChanged(_) => relist = true,
+                StoreEvent::ContactsChanged
+                | StoreEvent::FavoritesChanged
+                | StoreEvent::PresenceChanged(_) => relist = true,
                 StoreEvent::FriendCameOnline(name) => {
                     // `notifications.friend_online.enabled` — the per-category
                     // gate; the per-friend gate (notify_online) already ran in
@@ -1968,22 +1970,45 @@ impl ChatWindow {
             });
         }
 
-        // FRIENDS — a cross-network gathering of DM shortcuts. One person can
-        // be several nicks on several networks; this section collapses them to
-        // one row that opens their primary DM.
-        let friends: Vec<SidebarRow> = store
-            .contacts()
-            .into_iter()
-            .filter_map(|c| {
-                let key = store.contact_dm_key(c)?;
-                Some(SidebarRow {
+        // FRIENDS — favorited DMs under the favorites model (upstream #721:
+        // contacts are gone; a friend IS a favorited DM), or the legacy
+        // contacts list against an older server. FAVORITES — favorited
+        // channels, the model's second half.
+        let mut favorite_channels: Vec<SidebarRow> = Vec::new();
+        let friends: Vec<SidebarRow> = if store.favorites_model() {
+            let mut friends = Vec::new();
+            for f in store.favorites() {
+                let key = BufferKey::new(Some(f.network_id), &f.target);
+                let row = SidebarRow {
+                    label: store.buffer(&key).map(|b| b.display_name.clone()),
+                    presence: key
+                        .is_dm()
+                        .then(|| store.presence(f.network_id, &f.target)),
+                    contact: None,
                     key,
-                    label: Some(c.display_name.clone()),
-                    presence: Some(store.contact_presence(c)),
-                    contact: Some(c.id),
+                };
+                if row.key.is_dm() {
+                    friends.push(row);
+                } else if row.key.is_channel() {
+                    favorite_channels.push(row);
+                }
+            }
+            friends
+        } else {
+            store
+                .contacts()
+                .into_iter()
+                .filter_map(|c| {
+                    let key = store.contact_dm_key(c)?;
+                    Some(SidebarRow {
+                        key,
+                        label: Some(c.display_name.clone()),
+                        presence: Some(store.contact_presence(c)),
+                        contact: Some(c.id),
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
         if !friends.is_empty() {
             // The dot answers "is anyone actually there?", not "am I connected?".
             // Green when a friend is reachable, amber when the only ones on are
@@ -2006,12 +2031,25 @@ impl ChatWindow {
                 dot: Some(dot),
             });
         }
+        if !favorite_channels.is_empty() {
+            sections.push(Section {
+                header: Some("★ FAVORITES".to_string()),
+                offline: false,
+                keys: favorite_channels,
+                cross_network: true,
+                network_id: None,
+                is_friends: false,
+                dot: None,
+            });
+        }
 
         // Pinned — across all networks, any buffer kind.
         let mut pinned: Vec<BufferKey> = store
             .buffers
             .iter()
-            .filter(|(_, b)| b.pinned)
+            // The server unpins on favorite, but an out-of-date pin row must
+            // not double-place a buffer while frames race.
+            .filter(|(k, b)| b.pinned && !store.is_favorite(k))
             .map(|(k, _)| k.clone())
             .collect();
         pinned.sort_by_key(&sort_key);
@@ -2033,9 +2071,12 @@ impl ChatWindow {
         let mut dms: Vec<BufferKey> = store
             .buffers
             .iter()
-            // A friend's primary DM is shown under FRIENDS, so hide it here —
-            // otherwise the same conversation appears twice under two names.
-            .filter(|(k, b)| k.is_dm() && !b.pinned && !store.is_friend_primary_dm(k))
+            // A friend's DM renders under FRIENDS — favorited (new model) or
+            // a contact's primary (legacy) — so hide it here, or the same
+            // conversation appears twice under two names.
+            .filter(|(k, b)| {
+                k.is_dm() && !b.pinned && !store.is_favorite(k) && !store.is_friend_primary_dm(k)
+            })
             .map(|(k, _)| k.clone())
             .collect();
         dms.sort_by_key(|k| k.target.clone());
@@ -2061,6 +2102,8 @@ impl ChatWindow {
                     k.network_id == Some(*id)
                         && !b.pinned
                         && (k.is_server_log() || k.is_channel())
+                        // Favorited channels live in FAVORITES instead.
+                        && !store.is_favorite(k)
                 })
                 .map(|(k, _)| k.clone())
                 .collect();
@@ -3522,16 +3565,33 @@ impl ChatWindow {
         }
 
         // Friends. The label states which it will do, so the item never
-        // silently opens an editor for a contact the user forgot they made.
+        // silently acts on state the user forgot. Under the favorites model
+        // (upstream #721) a friend IS a favorited DM; against a legacy server
+        // it is a contact.
         let already = self
             .active
             .borrow()
             .as_ref()
             .and_then(|k| k.network_id)
-            .is_some_and(|net| self.app.store.borrow().contact_for(net, nick).is_some());
+            .is_some_and(|net| {
+                let store = self.app.store.borrow();
+                if store.favorites_model() {
+                    store.is_favorite(&BufferKey::new(Some(net), nick))
+                } else {
+                    store.contact_for(net, nick).is_some()
+                }
+            });
         let friend = gio::Menu::new();
         friend.append_item(&gio::MenuItem::new(
-            Some(if already { "Edit friend\u{2026}" } else { "Add to friends\u{2026}" }),
+            Some(if already {
+                if self.app.store.borrow().favorites_model() {
+                    "Remove from friends"
+                } else {
+                    "Edit friend\u{2026}"
+                }
+            } else {
+                "Add to friends\u{2026}"
+            }),
             Some("nick.cmd::friend"),
         ));
         model.append_section(None, &friend);
@@ -3593,7 +3653,15 @@ impl ChatWindow {
         let model = crate::nickmenu::menu_model(crate::nickmenu::Rank::None);
         let friend = gio::Menu::new();
         friend.append_item(&gio::MenuItem::new(
-            Some(if already { "Edit friend\u{2026}" } else { "Add to friends\u{2026}" }),
+            Some(if already {
+                if self.app.store.borrow().favorites_model() {
+                    "Remove from friends"
+                } else {
+                    "Edit friend\u{2026}"
+                }
+            } else {
+                "Add to friends\u{2026}"
+            }),
             Some("nick.cmd::friend"),
         ));
         model.append_section(None, &friend);
@@ -3615,12 +3683,18 @@ impl ChatWindow {
                 None => (false, false, false),
             }
         };
+        let (favorite, favorites_model) = {
+            let store = self.app.store.borrow();
+            (store.is_favorite(&key), store.favorites_model())
+        };
         let cx = crate::buffermenu::BufContext {
             is_channel: key.is_channel(),
             is_dm: key.is_dm(),
             in_store,
             joined,
             pinned,
+            favorite,
+            favorites_model,
         };
         let model = crate::buffermenu::menu_model(&cx);
 
@@ -4042,6 +4116,16 @@ impl ChatWindow {
                     crate::open_popout(&self.app, key);
                 }
             }
+            "favorite" => {
+                if let Some(net) = key.network_id {
+                    self.app.send(ClientVerb::FavoriteBuffer { network_id: net, target });
+                }
+            }
+            "unfavorite" => {
+                if let Some(net) = key.network_id {
+                    self.app.send(ClientVerb::UnfavoriteBuffer { network_id: net, target });
+                }
+            }
             "whois" => {
                 // Only offered on DM rows, whose target is the peer's nick.
                 // The reply is routed to the DM that was right-clicked, NOT
@@ -4193,7 +4277,33 @@ impl ChatWindow {
         // Friends are account state, not an IRC command — handled here rather
         // than in nickmenu's pure verb table.
         if id == "friend" {
-            crate::frienddialog::FriendDialog::add_for_nick(&self.app, network_id, &nick);
+            let (model, faved) = {
+                let store = self.app.store.borrow();
+                let key = BufferKey::new(Some(network_id), &nick);
+                (store.favorites_model(), store.is_favorite(&key))
+            };
+            if model {
+                let key = BufferKey::new(Some(network_id), &nick);
+                if faved {
+                    self.app.send(ClientVerb::UnfavoriteBuffer {
+                        network_id,
+                        target: self.app.wire_target(&key),
+                    });
+                } else {
+                    // The member may have no DM yet, and the server refuses to
+                    // favorite a closed/absent buffer. open-buffer mints the
+                    // row, and the same socket delivers it before the
+                    // favorite, so the favorite always lands (the web's exact
+                    // recipe).
+                    self.app.open_buffer(&key);
+                    self.app.send(ClientVerb::FavoriteBuffer {
+                        network_id,
+                        target: self.app.wire_target(&key),
+                    });
+                }
+            } else {
+                crate::frienddialog::FriendDialog::add_for_nick(&self.app, network_id, &nick);
+            }
             return;
         }
 

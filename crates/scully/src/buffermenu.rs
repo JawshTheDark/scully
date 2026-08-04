@@ -18,6 +18,11 @@ pub struct BufContext {
     /// Channels only: joined now, vs parted-but-still-open (offer Rejoin).
     pub joined: bool,
     pub pinned: bool,
+    /// Whether this buffer is currently favorited (upstream #721).
+    pub favorite: bool,
+    /// Whether the server speaks the favorites model at all — pre-#720
+    /// servers get no favorite items, since the verbs would bounce.
+    pub favorites_model: bool,
 }
 
 /// A menu entry. `Separator` becomes a gio menu section boundary, which GTK
@@ -47,6 +52,17 @@ pub fn entries(cx: &BufContext) -> Vec<Entry> {
     if cx.is_channel || cx.is_dm {
         v.push(if cx.pinned { item("unpin", "Unpin") } else { item("pin", "Pin to top") });
     }
+    // Favorites (upstream #721): a favorited DM is a friend, a favorited
+    // channel lives under FAVORITES. Names differ per kind because the
+    // sections do; the verbs are the same pair.
+    if cx.favorites_model && (cx.is_channel || cx.is_dm) {
+        v.push(match (cx.favorite, cx.is_dm) {
+            (false, true) => item("favorite", "Add to friends"),
+            (true, true) => item("unfavorite", "Remove from friends"),
+            (false, false) => item("favorite", "Add to favorites"),
+            (true, false) => item("unfavorite", "Remove from favorites"),
+        });
+    }
     if cx.is_channel {
         v.push(Entry::Separator);
         v.push(if cx.joined {
@@ -68,7 +84,11 @@ pub fn entries(cx: &BufContext) -> Vec<Entry> {
 /// Whether an id is one this menu can emit — the dispatch side asserts on this
 /// so a renamed id can't silently become a dead click.
 pub fn id_is_known(id: &str) -> bool {
-    matches!(id, "popout" | "read" | "pin" | "unpin" | "part" | "join" | "close" | "whois")
+    matches!(
+        id,
+        "popout" | "read" | "pin" | "unpin" | "part" | "join" | "close" | "whois"
+            | "favorite" | "unfavorite"
+    )
 }
 
 /// Build the gio menu model for `cx`. Separators split items into sections.
@@ -111,8 +131,15 @@ mod tests {
             .collect()
     }
 
-    const CHAN: BufContext =
-        BufContext { is_channel: true, is_dm: false, in_store: true, joined: true, pinned: false };
+    const CHAN: BufContext = BufContext {
+        is_channel: true,
+        is_dm: false,
+        in_store: true,
+        joined: true,
+        pinned: false,
+        favorite: false,
+        favorites_model: false,
+    };
 
     #[test]
     fn joined_channel_offers_leave_and_close_not_rejoin() {
@@ -143,7 +170,15 @@ mod tests {
     #[test]
     fn dm_can_close_and_pin_but_not_leave() {
         let dm =
-            BufContext { is_channel: false, is_dm: true, in_store: true, joined: false, pinned: false };
+            BufContext {
+                is_channel: false,
+                is_dm: true,
+                in_store: true,
+                joined: false,
+                pinned: false,
+                favorite: false,
+                favorites_model: false,
+            };
         let got = ids(&dm);
         assert!(got.contains(&"close"));
         assert!(got.contains(&"pin"));
@@ -161,6 +196,8 @@ mod tests {
             in_store: true,
             joined: false,
             pinned: false,
+            favorite: false,
+            favorites_model: true,
         };
         let got = ids(&srv);
         assert_eq!(got, ["popout", "read"]);
@@ -175,6 +212,28 @@ mod tests {
         assert!(!ids(&cx).contains(&"popout"));
         // …but still offers the rest.
         assert!(ids(&cx).contains(&"read"));
+    }
+
+    #[test]
+    fn favorite_items_follow_kind_and_model() {
+        // Pre-#720 servers get nothing — the verbs would bounce.
+        assert!(!ids(&CHAN).iter().any(|i| *i == "favorite" || *i == "unfavorite"));
+
+        let model = BufContext { favorites_model: true, ..CHAN };
+        assert!(ids(&model).contains(&"favorite"));
+        let faved = BufContext { favorite: true, ..model };
+        assert!(ids(&faved).contains(&"unfavorite"));
+
+        // DMs word it as friends; same verb pair underneath.
+        let dm = BufContext { is_channel: false, is_dm: true, joined: false, ..model };
+        let labels: Vec<&str> = entries(&dm)
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Item { label, .. } => Some(*label),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&"Add to friends"));
     }
 
     #[test]
