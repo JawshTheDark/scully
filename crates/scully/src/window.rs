@@ -3043,6 +3043,12 @@ impl ChatWindow {
                     &gtk::Label::builder()
                         .label(format!("⚠ can't play here: {err}"))
                         .wrap(true)
+                        // The cards' one-letter-column lesson, applied here
+                        // too: a wrapping label in a TextView anchor gets its
+                        // MINIMUM width, which is one character unless a
+                        // floor says otherwise (field screenshot: the note
+                        // rendered as a vertical strand of words).
+                        .width_chars(32)
                         .css_classes(["embed-note"])
                         .build(),
                 );
