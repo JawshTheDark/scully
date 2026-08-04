@@ -383,6 +383,15 @@ mod tests {
     #[test]
     fn palette_covers_every_defined_index() {
         assert_eq!(PALETTE.len(), 99);
+        // Spec pins (modern.ircdocs.horse/formatting.html): spot values from
+        // the extended table, verified against the published document. A
+        // future edit that shifts one entry breaks these, not just vibes.
+        assert_eq!(color_hex(16), Some("#470000"));
+        assert_eq!(color_hex(52), Some("#ff0000"));
+        assert_eq!(color_hex(87), Some("#ff94d3"));
+        assert_eq!(color_hex(98), Some("#ffffff"));
+        // 99 is "default colour": deliberately no entry, renders as default.
+        assert_eq!(color_hex(99), None);
         assert!(PALETTE.iter().all(|c| c.len() == 7 && c.starts_with('#')));
     }
 
