@@ -5249,18 +5249,16 @@ impl ChatWindow {
         }
         root.append(&styles);
 
-        // Colour swatches: user palette slots where set, defaults otherwise.
-        // A swatch inserts \x03NN — two digits always, so typing a digit
-        // right after can't mutate the colour.
+        // Colour swatches: the CANONICAL mIRC table, exactly as mIRC's own
+        // dialog lays it out — 0-15 on the first row, the 16-31 extended
+        // slots on the second. Deliberately NOT the user's theme overrides:
+        // a swatch inserts \x03NN onto the wire, and the wire means the
+        // standard colours; previewing theme-tinted ones misrepresented what
+        // everyone else would see (field report). Two digits always, so
+        // typing a digit right after can't mutate the colour.
         let grid = gtk::Grid::builder().row_spacing(4).column_spacing(4).build();
-        let user = self.mirc_palette.borrow().clone();
-        for i in 0..16u8 {
-            let colour = user
-                .get(i as usize)
-                .cloned()
-                .flatten()
-                .or_else(|| mirc::color_hex(i).map(str::to_string))
-                .unwrap_or_else(|| "#888888".to_string());
+        for i in 0..32u8 {
+            let colour = mirc::color_hex(i).unwrap_or("#888888").to_string();
             let swatch = gtk::Button::builder()
                 .tooltip_text(format!("Colour {i} — left: text, right: background"))
                 .css_classes(["mirc-swatch"])
@@ -5283,7 +5281,7 @@ impl ChatWindow {
                 this.pick_color(i, true);
             });
             swatch.add_controller(right);
-            grid.attach(&swatch, (i % 8) as i32, (i / 8) as i32, 1, 1);
+            grid.attach(&swatch, (i % 16) as i32, (i / 16) as i32, 1, 1);
         }
         root.append(&grid);
 
