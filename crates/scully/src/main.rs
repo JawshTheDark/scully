@@ -51,7 +51,22 @@ use app::AppRef;
 const APP_ID: &str = "io.jawsh.Scully";
 const STYLE: &str = include_str!("style.css");
 
+/// macOS: opt out of automatic window tabbing. With the system preference
+/// set to "always", every popout the tiler opens gets swallowed into one
+/// window's tab bar (field-tested by amiantos) — an app must decline the
+/// behavior explicitly, and there is no GTK surface for it.
+#[cfg(target_os = "macos")]
+fn disable_window_tabbing() {
+    use objc2::{class, msg_send};
+    unsafe {
+        let _: () = msg_send![class!(NSWindow), setAllowsAutomaticWindowTabbing: false];
+    }
+}
+
 fn main() -> glib::ExitCode {
+    #[cfg(target_os = "macos")]
+    disable_window_tabbing();
+
     // Disable the AT-SPI accessibility bridge. It is non-functional on many
     // sessions (a broken `org.a11y.atspi.Registry` floods the log with
     // registration failures for every widget and window, and has been

@@ -433,15 +433,21 @@ fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// macOS: System Events via osascript, matched by window name. Needs the
-/// user to grant Accessibility once; until then the error names the fix.
+/// macOS: System Events via osascript, matched by window name.
+///
+/// Two SEPARATE permissions gate this, and the field run confirmed users
+/// meet them in order: the Automation prompt ("control the system") appears
+/// by itself, but UI scripting ALSO needs Accessibility, which never
+/// prompts — it must be granted by hand. The script deliberately has no
+/// try-wrapping: the first version swallowed every error and reported
+/// success while moving nothing, which is the worst of all outcomes.
 #[cfg(target_os = "macos")]
 fn macos_place(placements: &[(String, i32, i32, i32, i32)]) -> Result<(), String> {
     let mut lines = String::new();
     for (title, x, y, w, h) in placements {
         let t = title.replace('"', "\\\"");
         lines.push_str(&format!(
-            "  try\n    set position of (first window whose name is \"{t}\") to {{{x}, {y}}}\n    set size of (first window whose name is \"{t}\") to {{{w}, {h}}}\n  end try\n"
+            "  set position of (every window whose name is \"{t}\") to {{{x}, {y}}}\n  set size of (every window whose name is \"{t}\") to {{{w}, {h}}}\n"
         ));
     }
     let script = format!(
@@ -453,8 +459,14 @@ fn macos_place(placements: &[(String, i32, i32, i32, i32)]) -> Result<(), String
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).into_owned();
-        return Err(if err.contains("assistive") || err.contains("1002") {
-            format!("{err} — grant Scully Accessibility in System Settings > Privacy")
+        return Err(if err.contains("assistive") {
+            format!(
+                "{err} — grant Accessibility to Scully (and Terminal, if launched from one) in \
+                 System Settings > Privacy & Security > Accessibility; this is separate from \
+                 the Automation prompt you already accepted"
+            )
+        } else if err.contains("1743") || err.contains("Not authorized") {
+            format!("{err} — allow Scully to control System Events under Privacy > Automation")
         } else {
             err
         });
