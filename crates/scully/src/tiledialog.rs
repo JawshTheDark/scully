@@ -179,12 +179,13 @@ pub fn open(app: &AppRef) {
             }
             let mon_idx = mon_radios.iter().position(|r| r.is_active()).unwrap_or(0);
             let geo = monitors[mon_idx].0.geometry();
+            let scale = monitors[mon_idx].0.scale_factor();
             let layout = layout_radios
                 .iter()
                 .find(|(_, r)| r.is_active())
                 .map(|(l, _)| *l)
                 .unwrap_or(Layout::Grid);
-            tile_windows(&app, &selected, geo, layout);
+            tile_windows(&app, &selected, geo, scale, layout);
             window.close();
         });
     }
@@ -233,7 +234,13 @@ pub fn dims_for(n: usize, layout: Layout) -> (usize, usize) {
     }
 }
 
-fn tile_windows(app: &AppRef, keys: &[BufferKey], geo: gtk::gdk::Rectangle, layout: Layout) {
+fn tile_windows(
+    app: &AppRef,
+    keys: &[BufferKey],
+    geo: gtk::gdk::Rectangle,
+    scale: i32,
+    layout: Layout,
+) {
     let (cols, rows) = dims_for(keys.len(), layout);
     let cell_w = geo.width() / cols as i32;
     let cell_h = geo.height() / rows as i32;
@@ -260,14 +267,199 @@ fn tile_windows(app: &AppRef, keys: &[BufferKey], geo: gtk::gdk::Rectangle, layo
         placements.push((title, x, y, cell_w, cell_h));
     }
 
-    // Give the compositor a beat to map the fresh surfaces, then ask KWin to
-    // place them. On non-KDE this quietly does nothing and the popouts stay
-    // where the shell put them, at grid-cell size.
+    // Give the shell a beat to map the fresh surfaces, then place through
+    // whichever door this world offers.
     glib::timeout_add_local_once(std::time::Duration::from_millis(450), move || {
-        if let Err(e) = kwin_place(&placements) {
-            tracing::info!(error = %e, "compositor placement unavailable (not KDE?)");
+        match place_all(&placements, scale) {
+            Ok(backend) => tracing::info!(backend, "windows placed"),
+            Err(e) => tracing::info!(error = %e, "no placement backend — popouts are cell-sized, shell decides position"),
         }
     });
+}
+
+/// Place windows through the platform's door. Every backend is a spawned
+/// incantation, not a linked library: PowerShell on Windows, osascript on
+/// macOS, and on Linux the KWin DBus first, then sway/i3 IPC, then wmctrl
+/// for any X11 WM. Spawning keeps the build identical on every target and
+/// turns a missing door into a log line instead of a crash.
+fn place_all(placements: &[(String, i32, i32, i32, i32)], scale: i32) -> Result<&'static str, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows_place(placements, scale).map(|()| "win32");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = scale; // AppleScript speaks logical points, like GDK.
+        return macos_place(placements).map(|()| "osascript");
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = scale; // Wayland/X11 tools speak logical coordinates here.
+        let mut errs = Vec::new();
+        match kwin_place(placements) {
+            Ok(()) => return Ok("kwin"),
+            Err(e) => errs.push(format!("kwin: {e}")),
+        }
+        if std::env::var_os("SWAYSOCK").is_some() {
+            match ipc_place("swaymsg", placements) {
+                Ok(()) => return Ok("sway"),
+                Err(e) => errs.push(format!("sway: {e}")),
+            }
+        }
+        if std::env::var_os("I3SOCK").is_some() {
+            match ipc_place("i3-msg", placements) {
+                Ok(()) => return Ok("i3"),
+                Err(e) => errs.push(format!("i3: {e}")),
+            }
+        }
+        match wmctrl_place(placements) {
+            Ok(()) => return Ok("wmctrl"),
+            Err(e) => errs.push(format!("wmctrl: {e}")),
+        }
+        Err(errs.join("; "))
+    }
+}
+
+/// sway and i3 share the i3 IPC command language; only the client binary
+/// differs. Windows are floated first — a tiled window ignores move/resize.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn ipc_place(client: &str, placements: &[(String, i32, i32, i32, i32)]) -> Result<(), String> {
+    for (title, x, y, w, h) in placements {
+        // Exact-match regex on the title, escaped: sway criteria are regex.
+        let escaped = regex_escape(title);
+        let cmd = format!(
+            "[title=\"^{escaped}$\"] floating enable, resize set {w} {h}, move absolute position {x} {y}"
+        );
+        let out = std::process::Command::new(client)
+            .arg(&cmd)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn regex_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            let escape = matches!(c, '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
+                | '|' | '^' | '$' | '\\');
+            escape.then_some('\\').into_iter().chain(std::iter::once(c))
+        })
+        .collect()
+}
+
+/// Any X11 window manager: wmctrl -r <title> -e. Only meaningful in an X11
+/// session; under Wayland the tool sees no windows and reports so.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn wmctrl_place(placements: &[(String, i32, i32, i32, i32)]) -> Result<(), String> {
+    if std::env::var("XDG_SESSION_TYPE").map(|t| t == "wayland").unwrap_or(false) {
+        return Err("wayland session — wmctrl cannot see the windows".into());
+    }
+    for (title, x, y, w, h) in placements {
+        let out = std::process::Command::new("wmctrl")
+            .args(["-r", title, "-e", &format!("0,{x},{y},{w},{h}")])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Windows: EnumWindows + SetWindowPos through an Add-Type PowerShell stub,
+/// matched by exact window title. Win32 speaks PHYSICAL pixels, so the
+/// logical cells are multiplied by the monitor's scale factor.
+#[cfg(target_os = "windows")]
+fn windows_place(placements: &[(String, i32, i32, i32, i32)], scale: i32) -> Result<(), String> {
+    let table: Vec<String> = placements
+        .iter()
+        .map(|(t, x, y, w, h)| {
+            format!(
+                "@{{T={};X={};Y={};W={};H={}}}",
+                ps_quote(t),
+                x * scale,
+                y * scale,
+                w * scale,
+                h * scale
+            )
+        })
+        .collect();
+    let script = format!(
+        r#"Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class ScullyTile {{
+  [DllImport("user32.dll")] public static extern bool EnumWindows(Func<IntPtr,IntPtr,bool> cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
+}}
+'@
+$wants = @({wants})
+[ScullyTile]::EnumWindows({{ param($h, $l)
+  $sb = New-Object System.Text.StringBuilder 512
+  [void][ScullyTile]::GetWindowText($h, $sb, 512)
+  $t = $sb.ToString()
+  foreach ($w in $wants) {{
+    if ($t -eq $w.T) {{ [void][ScullyTile]::SetWindowPos($h, [IntPtr]::Zero, $w.X, $w.Y, $w.W, $w.H, 0x0044) }}
+  }}
+  $true
+}}, [IntPtr]::Zero) | Out-Null
+"#,
+        wants = table.join(", ")
+    );
+    let dir = crate::paths::data_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("tile.ps1");
+    std::fs::write(&path, script).map_err(|e| e.to_string())?;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// macOS: System Events via osascript, matched by window name. Needs the
+/// user to grant Accessibility once; until then the error names the fix.
+#[cfg(target_os = "macos")]
+fn macos_place(placements: &[(String, i32, i32, i32, i32)]) -> Result<(), String> {
+    let mut lines = String::new();
+    for (title, x, y, w, h) in placements {
+        let t = title.replace('"', "\\\"");
+        lines.push_str(&format!(
+            "  try\n    set position of (first window whose name is \"{t}\") to {{{x}, {y}}}\n    set size of (first window whose name is \"{t}\") to {{{w}, {h}}}\n  end try\n"
+        ));
+    }
+    let script = format!(
+        "tell application \"System Events\"\n tell (first process whose name contains \"scully\")\n{lines} end tell\nend tell"
+    );
+    let out = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        return Err(if err.contains("assistive") || err.contains("1002") {
+            format!("{err} — grant Scully Accessibility in System Settings > Privacy")
+        } else {
+            err
+        });
+    }
+    Ok(())
 }
 
 /// Ask KWin to place our popouts via its scripting interface. Generated
