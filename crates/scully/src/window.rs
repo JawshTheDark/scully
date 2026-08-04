@@ -4496,6 +4496,7 @@ impl ChatWindow {
 
                     let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
                     col.set_valign(gtk::Align::Center);
+                    col.set_hexpand(true);
                     // Collapse the metadata's own whitespace runs: GitHub
                     // (among others) puts raw newlines in og:description, and
                     // explicit breaks defeat the two-line ellipsize clamp —
@@ -4518,7 +4519,7 @@ impl ChatWindow {
                                 // card crushed into a one-letter-wide column
                                 // (field screenshot: "R- e… S- u…").
                                 .width_chars(36)
-                                .max_width_chars(48)
+                                .hexpand(true)
                                 .css_classes(["preview-card-title"])
                                 .build(),
                         );
@@ -4534,7 +4535,7 @@ impl ChatWindow {
                                 .lines(2)
                                 .ellipsize(gtk::pango::EllipsizeMode::End)
                                 .width_chars(36)
-                                .max_width_chars(56)
+                                .hexpand(true)
                                 .css_classes(["preview-card-desc"])
                                 .build(),
                         );
@@ -4555,21 +4556,22 @@ impl ChatWindow {
                     });
                     card.add_controller(click);
 
-                    // Centred in the pane (field request), via paragraph
-                    // justification on the anchor's line — the same mechanism
-                    // the unread divider uses.
+                    // Full-width (field request, superseding centred): the
+                    // card spans the buffer so it reads as a section of the
+                    // UI rather than an island breaking it up, and long
+                    // titles get the room. A TextView anchor grants only
+                    // natural size, so the span is an explicit width request
+                    // from the view's current allocation; renders are
+                    // frequent enough that resize staleness self-heals.
+                    let view_w = self.text_view.width();
+                    if view_w > 60 {
+                        card.set_size_request(view_w - 24, -1);
+                    }
                     let mut end = self.text.end_iter();
                     self.text.insert(&mut end, "\n");
-                    let line_start = self.text.end_iter().offset();
                     let mut end = self.text.end_iter();
                     let anchor = self.text.create_child_anchor(&mut end);
                     self.text_view.add_child_at_anchor(&card, &anchor);
-                    self.ensure_tag("center-line", |b| {
-                        b.justification(gtk::Justification::Center).build()
-                    });
-                    let start = self.text.iter_at_offset(line_start);
-                    let end = self.text.end_iter();
-                    self.text.apply_tag_by_name("center-line", &start, &end);
                     self.embeds.borrow_mut().push(card.upcast());
                 }
                 Some(None) => {} // fetched, nothing usable
