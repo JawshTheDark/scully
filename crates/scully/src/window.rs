@@ -4347,7 +4347,7 @@ impl ChatWindow {
             // Clone the cache entry and DROP the borrow before doing anything
             // that might re-borrow `previews` (fetch_preview borrows it mut).
             let cached = self.app.previews.borrow().get(&url).cloned();
-            match cached {
+            match cached.map(|(_, p)| p) {
                 Some(Some(preview)) => {
                     // One CARD, not floating text lines: bordered, accent-
                     // edged, thumbnail beside title — visually separate from

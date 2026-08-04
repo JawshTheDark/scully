@@ -111,6 +111,7 @@ pub fn is_youtube(url: &str) -> bool {
 
 /// A fetched link preview: Open Graph title and description.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Preview {
     pub title: String,
     pub description: String,

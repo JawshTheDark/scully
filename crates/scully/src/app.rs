@@ -123,7 +123,13 @@ pub struct App {
     pub images: crate::media::ImageCache,
     /// Link-preview cache: url → fetched Open Graph title/description. `None`
     /// entry means "fetched, nothing usable" so we don't refetch.
-    pub previews: RefCell<std::collections::HashMap<String, Option<crate::media::Preview>>>,
+    /// Link-preview cache: url → (fetched-at unix seconds, result). `None`
+    /// result = fetched and found nothing (negative-cached, so a junk link
+    /// isn't refetched every render). fetched-at 0 = in flight this session,
+    /// never persisted. Loaded from and saved to previews.json so reopening
+    /// the app doesn't refetch every card in the scrollback.
+    pub previews:
+        RefCell<std::collections::HashMap<String, (i64, Option<crate::media::Preview>)>>,
 
     /// Latest search results, and the token they answered — so a stale reply
     /// from a superseded query is dropped (§6's token discipline).
@@ -179,7 +185,7 @@ impl App {
             settings_window: RefCell::new(None),
             device: RefCell::new(DeviceSettings::load()),
             images: crate::media::ImageCache::default(),
-            previews: RefCell::new(std::collections::HashMap::new()),
+            previews: RefCell::new(load_previews()),
             chanlist: RefCell::new(Vec::new()),
             chanlist_total: Cell::new(0),
             chanlist_loading: Cell::new(false),
@@ -1064,8 +1070,9 @@ impl App {
         if self.previews.borrow().contains_key(&url) {
             return;
         }
-        // Reserve the slot so concurrent renders don't refetch.
-        self.previews.borrow_mut().insert(url.clone(), None);
+        // Reserve the slot so concurrent renders don't refetch. fetched-at 0
+        // marks in-flight; it renders as "nothing yet" and never persists.
+        self.previews.borrow_mut().insert(url.clone(), (0, None));
 
         let app = self.clone();
         let fetch_url = url.clone();
@@ -1103,7 +1110,8 @@ impl App {
                 (!preview.is_empty()).then_some(preview)
             },
             move |result| {
-                app.previews.borrow_mut().insert(url, result);
+                app.previews.borrow_mut().insert(url, (unix_now(), result));
+                save_previews(&app.previews.borrow());
                 app.notify(&[StoreEvent::BufferChanged(wake)]);
             },
         );
@@ -1220,4 +1228,56 @@ fn play_sound_file(path: &std::path::Path, volume: f64) {
         v.retain(|m| !m.is_ended());
         v.push(media);
     });
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn previews_path() -> std::path::PathBuf {
+    crate::paths::data_dir().join("previews.json")
+}
+
+/// Preview entries younger than this are trusted across restarts; older ones
+/// refetch, since page metadata does drift.
+const PREVIEW_TTL_SECS: i64 = 7 * 24 * 3600;
+/// Newest entries kept at save time — a busy scrollback's worth, bounded.
+const PREVIEW_CAP: usize = 500;
+
+fn load_previews() -> std::collections::HashMap<String, (i64, Option<crate::media::Preview>)> {
+    let now = unix_now();
+    std::fs::read(previews_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<
+            std::collections::HashMap<String, (i64, Option<crate::media::Preview>)>,
+        >(&bytes).ok())
+        .map(|m| {
+            m.into_iter()
+                .filter(|(_, (at, _))| *at > 0 && now - at < PREVIEW_TTL_SECS)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persist the cache, newest PREVIEW_CAP entries, skipping in-flight slots.
+/// Small (≤500 rows of text) and infrequent (once per completed fetch), so a
+/// plain rewrite beats bookkeeping.
+fn save_previews(
+    map: &std::collections::HashMap<String, (i64, Option<crate::media::Preview>)>,
+) {
+    let mut rows: Vec<(&String, &(i64, Option<crate::media::Preview>))> =
+        map.iter().filter(|(_, (at, _))| *at > 0).collect();
+    rows.sort_by_key(|(_, (at, _))| std::cmp::Reverse(*at));
+    rows.truncate(PREVIEW_CAP);
+    let out: std::collections::HashMap<_, _> = rows.into_iter().collect();
+    let path = previews_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_vec(&out) {
+        let _ = std::fs::write(path, json);
+    }
 }
