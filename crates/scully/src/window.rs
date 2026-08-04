@@ -4496,11 +4496,18 @@ impl ChatWindow {
 
                     let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
                     col.set_valign(gtk::Align::Center);
-                    if !preview.title.is_empty() {
+                    // Collapse the metadata's own whitespace runs: GitHub
+                    // (among others) puts raw newlines in og:description, and
+                    // explicit breaks defeat the two-line ellipsize clamp —
+                    // the card in the field report was ten lines tall.
+                    let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let title = flat(&preview.title);
+                    let description = flat(&preview.description);
+                    if !title.is_empty() {
                         col.append(
                             &gtk::Label::builder()
                                 .xalign(0.0)
-                                .label(&preview.title)
+                                .label(&title)
                                 .wrap(true)
                                 .wrap_mode(gtk::pango::WrapMode::WordChar)
                                 .lines(2)
@@ -4516,8 +4523,8 @@ impl ChatWindow {
                                 .build(),
                         );
                     }
-                    if !preview.description.is_empty() {
-                        let desc: String = preview.description.chars().take(220).collect();
+                    if !description.is_empty() {
+                        let desc: String = description.chars().take(220).collect();
                         col.append(
                             &gtk::Label::builder()
                                 .xalign(0.0)
@@ -4548,12 +4555,21 @@ impl ChatWindow {
                     });
                     card.add_controller(click);
 
+                    // Centred in the pane (field request), via paragraph
+                    // justification on the anchor's line — the same mechanism
+                    // the unread divider uses.
                     let mut end = self.text.end_iter();
                     self.text.insert(&mut end, "\n");
-                    self.insert_with_tags(&" ".repeat(self.text_column()), &["time"]);
+                    let line_start = self.text.end_iter().offset();
                     let mut end = self.text.end_iter();
                     let anchor = self.text.create_child_anchor(&mut end);
                     self.text_view.add_child_at_anchor(&card, &anchor);
+                    self.ensure_tag("center-line", |b| {
+                        b.justification(gtk::Justification::Center).build()
+                    });
+                    let start = self.text.iter_at_offset(line_start);
+                    let end = self.text.end_iter();
+                    self.text.apply_tag_by_name("center-line", &start, &end);
                     self.embeds.borrow_mut().push(card.upcast());
                 }
                 Some(None) => {} // fetched, nothing usable
