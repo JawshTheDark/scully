@@ -3004,9 +3004,13 @@ impl ChatWindow {
         );
     }
 
-    /// A poster button that only constructs the real media widget — and with
-    /// it the native pipeline — when the user presses play.
-    fn deferred_player(url: &str, audio: bool) -> gtk::Widget {
+    /// A poster button that fetches the media to the on-disk cache and only
+    /// then constructs the player — over a LOCAL file. Remote URLs would go
+    /// through GIO, which cannot open https without gvfs (absent on most KDE
+    /// systems): every remote play failed "Failed to pause" while the same
+    /// bytes played fine from disk. The native pipeline still only exists
+    /// after a deliberate press (#11's crash class).
+    fn deferred_player(app: &AppRef, url: &str, audio: bool) -> gtk::Widget {
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let name = url.rsplit('/').next().unwrap_or(url);
         let poster = gtk::Button::builder()
@@ -3022,9 +3026,36 @@ impl ChatWindow {
         // ghost audio with no widget left to stop it.
         let container_ref = container.downgrade();
         let url = url.to_string();
+        let app = app.clone();
         poster.connect_clicked(move |btn| {
-            let Some(container_ref) = container_ref.upgrade() else { return };
-            let media = gtk::MediaFile::for_file(&gtk::gio::File::for_uri(&url));
+            let Some(weak_check) = container_ref.upgrade() else { return };
+            drop(weak_check);
+            btn.set_sensitive(false);
+            btn.set_label("⏳ fetching…");
+            let container_ref = container_ref.clone();
+            let btn = btn.clone();
+            app.fetch_media(url.clone(), move |result| {
+                let Some(container_ref) = container_ref.upgrade() else { return };
+                let path = match result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        btn.set_sensitive(true);
+                        btn.set_label("▶ retry");
+                        defuse_media(&container_ref.clone().upcast());
+                        clear_box(&container_ref);
+                        container_ref.append(&btn);
+                        container_ref.append(
+                            &gtk::Label::builder()
+                                .label(format!("⚠ couldn't fetch: {e}"))
+                                .wrap(true)
+                                .width_chars(32)
+                                .css_classes(["embed-note"])
+                                .build(),
+                        );
+                        return;
+                    }
+                };
+                let media = gtk::MediaFile::for_filename(&path);
             let widget: gtk::Widget = if audio {
                 let controls = gtk::MediaControls::new(Some(&media));
                 controls.set_size_request(360, -1);
@@ -3035,7 +3066,7 @@ impl ChatWindow {
                 video.upcast()
             };
             widget.add_css_class("embed");
-            container_ref.remove(btn);
+            container_ref.remove(&btn);
             container_ref.append(&widget);
 
             // A backend-less GTK (the Windows bundle ships no gstreamer)
@@ -3066,7 +3097,8 @@ impl ChatWindow {
                         .build(),
                 );
             });
-            media.play();
+                media.play();
+            });
         });
         container.upcast()
     }
@@ -4444,10 +4476,10 @@ impl ChatWindow {
                 // A poster button turns that poisoned-buffer crash into, at
                 // very worst, a crash on a deliberate press of play.
                 crate::media::MediaKind::Video if device.inline_videos => {
-                    Some(Self::deferred_player(&url, false))
+                    Some(Self::deferred_player(&self.app, &url, false))
                 }
                 crate::media::MediaKind::Audio if device.inline_audio => {
-                    Some(Self::deferred_player(&url, true))
+                    Some(Self::deferred_player(&self.app, &url, true))
                 }
                 _ => None,
             };

@@ -1017,6 +1017,83 @@ impl App {
         );
     }
 
+    /// Download a media file to the on-disk cache and hand back its path.
+    ///
+    /// Exists because GtkMediaFile reads remote URLs through GIO, and GIO
+    /// cannot open https without gvfs — absent on most KDE systems, so every
+    /// remote play failed "Failed to pause" while the same bytes played
+    /// perfectly from disk (proven by probe on the field machine). Download
+    /// -then-play sidesteps gvfs everywhere and makes flaky hosts a fetch
+    /// error instead of a stalled pipeline.
+    pub fn fetch_media(
+        self: &AppRef,
+        url: String,
+        done: impl FnOnce(Result<std::path::PathBuf, String>) + 'static,
+    ) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut h);
+        let ext = url
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.rsplit_once('.'))
+            .map(|(_, e)| e.chars().take(5).collect::<String>())
+            .filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or_else(|| "bin".into());
+        let dir = crate::paths::data_dir().join("media");
+        let path = dir.join(format!("{:016x}.{ext}", h.finish()));
+        if path.exists() {
+            done(Ok(path));
+            return;
+        }
+        let fetch_url = url.clone();
+        let target = path.clone();
+        self.spawn_async(
+            async move {
+                const CAP: u64 = 200 * 1024 * 1024;
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(300))
+                    .connect_timeout(std::time::Duration::from_secs(15))
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let mut resp =
+                    client.get(&fetch_url).send().await.map_err(|e| e.to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("HTTP {}", resp.status()));
+                }
+                if resp.content_length().unwrap_or(0) > CAP {
+                    return Err("file too large to fetch for inline playback".into());
+                }
+                std::fs::create_dir_all(target.parent().unwrap())
+                    .map_err(|e| e.to_string())?;
+                // Stream to a temp name, rename on success: a partial file
+                // must never be mistaken for a cached one.
+                let tmp = target.with_extension("part");
+                let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+                let mut written: u64 = 0;
+                while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+                    written += chunk.len() as u64;
+                    if written > CAP {
+                        drop(file);
+                        let _ = std::fs::remove_file(&tmp);
+                        return Err("file too large to fetch for inline playback".into());
+                    }
+                    std::io::Write::write_all(&mut file, &chunk)
+                        .map_err(|e| e.to_string())?;
+                }
+                drop(file);
+                std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;
+                Ok(target)
+            },
+            move |result| {
+                if result.is_ok() {
+                    prune_media_cache();
+                }
+                done(result);
+            },
+        );
+    }
+
     pub fn fetch_image(self: &AppRef, url: String, wake: BufferKey) {
         if !self.images.begin(&url) {
             return;
@@ -1279,5 +1356,35 @@ fn save_previews(
     }
     if let Ok(json) = serde_json::to_vec(&out) {
         let _ = std::fs::write(path, json);
+    }
+}
+
+/// Keep the media cache under a lid: newest ~1 GiB survives, oldest go.
+fn prune_media_cache() {
+    const LID: u64 = 1024 * 1024 * 1024;
+    let dir = crate::paths::data_dir().join("media");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            m.is_file().then(|| {
+                (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), e.path())
+            })
+        })
+        .collect();
+    let total: u64 = files.iter().map(|(_, len, _)| len).sum();
+    if total <= LID {
+        return;
+    }
+    files.sort_by_key(|(t, _, _)| *t);
+    let mut excess = total - LID;
+    for (_, len, path) in files {
+        if std::fs::remove_file(&path).is_ok() {
+            excess = excess.saturating_sub(len);
+            if excess == 0 {
+                break;
+            }
+        }
     }
 }
