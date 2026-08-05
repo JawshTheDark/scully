@@ -100,6 +100,7 @@ jobs:
           Priority: optional
           Architecture: ${{ matrix.deb_arch }}
           Depends: libgtk-4-1 (>= 4.12), libasound2
+          Recommends: gstreamer1.0-plugins-good, gstreamer1.0-libav
           Maintainer: JawshTheDark <noreply@users.noreply.github.com>
           Description: Native GTK4 client for a self-hosted Lurker IRC server
            Scully is a native desktop client for Lurker, the self-hosted
@@ -122,6 +123,8 @@ jobs:
           URL:            https://github.com/JawshTheDark/scully
           Requires:       gtk4 >= 4.12
           Requires:       alsa-lib
+          Suggests:       gstreamer1-plugins-good
+          Suggests:       gstreamer1-libav
           %description
           Scully is a native desktop client for Lurker, the self-hosted
           always-on IRC client, with a single-pane layout on phone-sized screens.

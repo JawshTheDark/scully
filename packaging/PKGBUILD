@@ -16,6 +16,12 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/JawshTheDark/scully"
 license=('MPL-2.0')
 depends=('gtk4' 'alsa-lib')
+# Inline video/audio playback rides gstreamer: -good carries the container
+# demuxers (qtdemux for .mov/.mp4, matroskademux for webm/mkv), gst-libav the
+# common codecs. Without them the player shows an honest "can't play here"
+# note — the app works fine otherwise, hence optional.
+optdepends=('gst-plugins-good: inline video/audio playback (container demuxers)'
+            'gst-libav: H.264/AAC codecs for inline playback')
 makedepends=('rust' 'clang' 'pkgconf' 'librsvg')
 # Arch enables LTO in makepkg by default. That compiles ring's C objects with
 # -flto while the Rust link does not use the LTO plugin, and every C symbol ring
