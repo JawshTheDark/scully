@@ -288,6 +288,10 @@ impl ChatWindow {
                 .label("SCULLY")
                 .xalign(0.0)
                 .hexpand(true)
+                // Ellipsize, or the brand's natural width joins the header's
+                // MINIMUM — and with shrink_start_child(false) below, the
+                // header minimum is the floor the user cannot drag under.
+                .ellipsize(gtk::pango::EllipsizeMode::End)
                 .css_classes(["brand-mark"])
                 .build(),
         );
@@ -509,6 +513,31 @@ impl ChatWindow {
             // widening — which clipped the left edge off every row in the list.
             .shrink_start_child(false)
             .build();
+        // The toolbar scales with the pane (field report: seven full-size
+        // buttons set a ~300px floor the user could not drag below). Under
+        // the threshold the header goes compact — smaller buttons, smaller
+        // icons — which lowers the pane's own minimum, since the header IS
+        // the minimum under shrink_start_child(false).
+        {
+            // The threshold must sit ABOVE the full-size header's own minimum
+            // (~330px for seven 30px buttons): the divider cannot be dragged
+            // below the current minimum, so a lower threshold would simply
+            // never be reached — compact must engage while shrinking is still
+            // possible, whereupon it lowers the floor itself.
+            let apply = |header: &gtk::Box, position: i32| {
+                let compact = position < 340;
+                if compact != header.has_css_class("compact") {
+                    if compact {
+                        header.add_css_class("compact");
+                    } else {
+                        header.remove_css_class("compact");
+                    }
+                }
+            };
+            apply(&sidebar_header, 290); // matches the initial position above
+            let header = sidebar_header.clone();
+            outer.connect_position_notify(move |paned| apply(&header, paned.position()));
+        }
         // The root is an Overlay so media can be shown *inside* this window —
         // a lightbox over the conversation rather than a separate window that
         // lands wherever the compositor decides.
