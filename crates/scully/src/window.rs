@@ -4387,6 +4387,23 @@ impl ChatWindow {
             return;
         }
 
+        // Slap rolls dice, and dice have no place in the pure verb table:
+        // pick from the armory here, seeded off the clock — variety, not
+        // cryptography.
+        if id == "slap" {
+            let roll = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as usize)
+                .unwrap_or(0);
+            self.app.send(ClientVerb::Action {
+                network_id,
+                target: self.app.wire_target(&key),
+                text: crate::nickmenu::slap_text(&nick, roll),
+                client_id: Some(new_client_id()),
+            });
+            return;
+        }
+
         let Some(cmd) = crate::nickmenu::Cmd::from_id(id) else { return };
 
         // Query changes window state, so it lives here rather than in the

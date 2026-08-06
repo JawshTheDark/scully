@@ -173,6 +173,42 @@ pub fn ban_mask(nick: &str, host: Option<&str>) -> String {
     }
 }
 
+/// The slap armory. Index 0 is the classic and must stay the classic —
+/// it is the deterministic default and the one the tests pin. Everything
+/// else is fair game for the roll.
+pub const SLAPS: &[&str] = &[
+    "slaps {nick} around a bit with a large trout",
+    "slaps {nick} around a bit with a slightly damp halibut",
+    "slaps {nick} with a trout of unusual size",
+    "gently taps {nick} with a single sardine, as a warning",
+    "slaps {nick} around a bit with a 56k modem",
+    "slaps {nick} with a rolled-up RFC 1459",
+    "slaps {nick} around a bit with an unhandled exception",
+    "slaps {nick} with a fish so fresh it still has opinions",
+    "slaps {nick} around a bit with a NULL pointer (segfault imminent)",
+    "slaps {nick} with the entire works of a confused octopus",
+    "slaps {nick} around a bit with a keyboard missing its any key",
+    "slaps {nick} with a salmon travelling at terminal velocity",
+    "slaps {nick} around a bit with a soggy ethernet cable",
+    "slaps {nick} with a leather-bound copy of the GTK documentation",
+    "slaps {nick} around a bit with a merge conflict",
+    "slaps {nick} with a floppy disk containing their permanent record",
+    "slaps {nick} around a bit with an expired SSL certificate",
+    "slaps {nick} with a swordfish (the fish, not the movie)",
+    "slaps {nick} around a bit with a regex that almost works",
+    "slaps {nick} with a tuna that has seen things",
+    "slaps {nick} around a bit with last year's backup",
+    "slaps {nick} with an entire school of very disappointed herring",
+    "slaps {nick} around a bit with a dragon's tail (the dragon apologises)",
+    "slaps {nick} with a copy of their own IRC logs",
+];
+
+/// One slap from the armory. `roll` may be any number — it wraps — so the
+/// caller can throw dice without knowing the armory's size.
+pub fn slap_text(nick: &str, roll: usize) -> String {
+    SLAPS[roll % SLAPS.len()].replace("{nick}", nick)
+}
+
 /// The verbs a menu command sends. `channel` is the buffer the menu was opened
 /// in (also the CTCP `issuing_target`); `host` is the member's known host for
 /// ban masks. `Query` is not handled here — opening a DM changes window state,
@@ -241,7 +277,11 @@ pub fn verbs_for(
         Cmd::Slap => vec![ClientVerb::Action {
             network_id,
             target: channel.to_string(),
-            text: format!("slaps {nick} around a bit with a large trout"),
+            // The roll happens at the CALL SITE (run_nick_command passes a
+            // random index through slap_text) — this table stays pure and
+            // testable, and index 0 remains the eternal classic so the
+            // deterministic default is still the trout.
+            text: slap_text(nick, 0),
             client_id: None,
         }],
         // Handled above or by the caller.
@@ -412,12 +452,25 @@ mod tests {
 
     #[test]
     fn slap_is_an_action_with_the_traditional_trout() {
+        // Index 0 is the classic, and the pure path must stay deterministic.
         let verbs = verbs_for(Cmd::Slap, 1, "#chan", "amiantos", None);
         let [ClientVerb::Action { target, text, .. }] = verbs.as_slice() else {
             panic!("expected action, got {verbs:?}");
         };
         assert_eq!(target, "#chan");
         assert_eq!(text, "slaps amiantos around a bit with a large trout");
+    }
+
+    #[test]
+    fn the_armory_rolls_wrap_and_name_the_victim() {
+        assert!(SLAPS.len() >= 20, "an armory, not a shelf");
+        for (i, template) in SLAPS.iter().enumerate() {
+            assert!(template.contains("{nick}"), "slap {i} names no victim: {template}");
+        }
+        // Any roll lands: wrapping means the caller needs no bounds.
+        assert_eq!(slap_text("bob", 0), "slaps bob around a bit with a large trout");
+        assert_eq!(slap_text("bob", SLAPS.len()), slap_text("bob", 0), "wraps");
+        assert!(slap_text("bob", usize::MAX).contains("bob"));
     }
 
     #[test]
