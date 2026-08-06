@@ -373,6 +373,20 @@ impl ChatWindow {
             .child(&text_view)
             .vexpand(true)
             .build();
+        // The conversation must NEVER pan sideways. Policy Never hides the
+        // scrollbar but a TextView still scrolls internally to keep anchors
+        // visible — an embed wider than the pane (a full-width card sized
+        // before the pane narrowed holds its old minimum) dragged the view
+        // right on every switch-to-bottom, shearing the left edge off the
+        // whole column (field screenshot). Pin the adjustment to zero.
+        {
+            let hadj = scroller.hadjustment();
+            hadj.connect_value_changed(|adj| {
+                if adj.value() != 0.0 {
+                    adj.set_value(0.0);
+                }
+            });
+        }
 
         let status_label =
             gtk::Label::builder().xalign(0.0).css_classes(["status"]).hexpand(true).build();
@@ -4682,9 +4696,14 @@ impl ChatWindow {
                     // natural size, so the span is an explicit width request
                     // from the view's current allocation; renders are
                     // frequent enough that resize staleness self-heals.
+                    // A size request is a MINIMUM: sized once at the pane's
+                    // widest, it would overflow after the user narrows the
+                    // pane (renders refresh it, but not until this buffer
+                    // re-renders). Undershoot on purpose and cap it, so a
+                    // stale demand can never exceed a plausible pane.
                     let view_w = self.text_view.width();
                     if view_w > 60 {
-                        card.set_size_request(view_w - 24, -1);
+                        card.set_size_request((view_w - 24).min(1600), -1);
                     }
                     let mut end = self.text.end_iter();
                     self.text.insert(&mut end, "\n");
