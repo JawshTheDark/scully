@@ -4395,10 +4395,32 @@ impl ChatWindow {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() as usize)
                 .unwrap_or(0);
+            // The armory lives in slaps.txt (config dir): seeded with the
+            // built-ins on first slap, one per line, {nick} is the victim,
+            // # comments — and read per slap, so edits land live. A missing
+            // or emptied file falls back to the built-in table.
+            let path = crate::paths::config_dir().join("slaps.txt");
+            if !path.exists() {
+                let _ = std::fs::create_dir_all(crate::paths::config_dir());
+                let _ = std::fs::write(
+                    &path,
+                    format!(
+                        "# Scully slaps — one per line, {{nick}} is the victim.\n\
+                         # Blank lines and # comments are ignored; edits apply\n\
+                         # on the next slap, no restart needed.\n{}\n",
+                        crate::nickmenu::SLAPS.join("\n")
+                    ),
+                );
+            }
+            let text = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|c| crate::nickmenu::parse_slaps(&c))
+                .map(|list| crate::nickmenu::slap_from(&list, &nick, roll))
+                .unwrap_or_else(|| crate::nickmenu::slap_text(&nick, roll));
             self.app.send(ClientVerb::Action {
                 network_id,
                 target: self.app.wire_target(&key),
-                text: crate::nickmenu::slap_text(&nick, roll),
+                text,
                 client_id: Some(new_client_id()),
             });
             return;

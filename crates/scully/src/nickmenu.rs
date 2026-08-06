@@ -209,6 +209,26 @@ pub fn slap_text(nick: &str, roll: usize) -> String {
     SLAPS[roll % SLAPS.len()].replace("{nick}", nick)
 }
 
+/// Parse a user slaps file: one slap per line, `{nick}` names the victim,
+/// blank lines and `#` comments ignored. `None` when nothing usable remains
+/// — the caller falls back to the built-in armory rather than slapping with
+/// an empty string.
+pub fn parse_slaps(contents: &str) -> Option<Vec<String>> {
+    let lines: Vec<String> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    (!lines.is_empty()).then_some(lines)
+}
+
+/// One slap drawn from a parsed user list. A line without `{nick}` is used
+/// as-is — the file is the user's own; we don't police their comedy.
+pub fn slap_from(list: &[String], nick: &str, roll: usize) -> String {
+    list[roll % list.len()].replace("{nick}", nick)
+}
+
 /// The verbs a menu command sends. `channel` is the buffer the menu was opened
 /// in (also the CTCP `issuing_target`); `host` is the member's known host for
 /// ban masks. `Query` is not handled here — opening a DM changes window state,
@@ -459,6 +479,19 @@ mod tests {
         };
         assert_eq!(target, "#chan");
         assert_eq!(text, "slaps amiantos around a bit with a large trout");
+    }
+
+    #[test]
+    fn slaps_files_parse_comments_and_blanks_away() {
+        let file = "# my slaps\n\nslaps {nick} with a haddock\n  \n# end\nboops {nick}\n";
+        let list = parse_slaps(file).expect("two usable lines");
+        assert_eq!(list.len(), 2);
+        assert_eq!(slap_from(&list, "bob", 0), "slaps bob with a haddock");
+        assert_eq!(slap_from(&list, "bob", 3), "boops bob", "wraps");
+        // Nothing usable → None, so the caller falls back to the armory
+        // instead of slapping with an empty string.
+        assert!(parse_slaps("# only comments\n\n").is_none());
+        assert!(parse_slaps("").is_none());
     }
 
     #[test]
