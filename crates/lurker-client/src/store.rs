@@ -347,6 +347,20 @@ impl Store {
         self.call_counts.get(key).copied().unwrap_or(0)
     }
 
+    /// Remove a network and everything it owned — its buffers, presence rows
+    /// and call counts. The server's DELETE fans out no network-removed
+    /// frame (only a favorites re-sync), so the client that asked must purge
+    /// its own ledger, or the dead network haunts the sidebar and a retry
+    /// answers "network not found".
+    pub fn remove_network(&mut self, id: i64) -> bool {
+        let existed = self.networks.remove(&id).is_some();
+        self.buffers.retain(|k, _| k.network_id != Some(id));
+        self.presence.retain(|(net, _), _| *net != id);
+        self.call_counts.retain(|k, _| k.network_id != Some(id));
+        self.snapshot_channels.retain(|k, _| k.network_id != Some(id));
+        existed
+    }
+
     /// Whether the server speaks the favorites model (upstream #721). When it
     /// does, FRIENDS/FAVORITES render from favorites and the legacy contacts
     /// surface is dead weight the server never feeds.

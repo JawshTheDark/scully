@@ -810,9 +810,22 @@ impl App {
         report: impl Fn(Result<(), String>) + 'static,
     ) {
         let Some(rest) = self.rest.borrow().clone() else { return };
+        let app = self.clone();
         self.spawn_async(
             async move { rest.delete_network(id).await },
-            move |res| report(res.map_err(|e| e.to_string())),
+            move |res| {
+                if res.is_ok() {
+                    // The server sends no network-removed frame — purge our
+                    // own ledger or the network haunts the sidebar (field
+                    // report: it lingered, and the retry hit "not found").
+                    app.store.borrow_mut().remove_network(id);
+                    app.notify(&[
+                        StoreEvent::NetworkChanged(id),
+                        StoreEvent::BufferListChanged,
+                    ]);
+                }
+                report(res.map_err(|e| e.to_string()));
+            },
         );
     }
 

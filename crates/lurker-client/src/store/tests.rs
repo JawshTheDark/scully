@@ -1095,3 +1095,24 @@ fn favorite_dm_peer_coming_online_fires_without_any_contact() {
     let out = apply(&mut store, ev);
     assert!(!out.iter().any(|e| matches!(e, StoreEvent::FriendCameOnline(_))));
 }
+
+#[test]
+fn removing_a_network_takes_everything_it_owned() {
+    // Field report: after DELETE the network lingered in the sidebar and a
+    // retry answered "network not found" — the server fans out no
+    // network-removed frame, so the asking client must purge its own ledger.
+    let mut store = connected_store();
+    apply(&mut store, backlog("#chat", "replace", vec![row(1, "hi")]));
+    apply(&mut store, presence_event(1, "amiantos", "online"));
+    assert!(store.networks.contains_key(&1));
+    assert!(store.buffer(&key("#chat")).is_some());
+
+    assert!(store.remove_network(1));
+    assert!(!store.networks.contains_key(&1));
+    assert!(store.buffer(&key("#chat")).is_none());
+    assert_eq!(store.presence(1, "amiantos"), Presence::Offline, "net gone reads offline");
+
+    // Other networks untouched; double-remove reports nothing left.
+    assert!(store.networks.contains_key(&2));
+    assert!(!store.remove_network(1));
+}
