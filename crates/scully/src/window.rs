@@ -380,12 +380,39 @@ impl ChatWindow {
         // visible — an embed wider than the pane (a full-width card sized
         // before the pane narrowed holds its old minimum) dragged the view
         // right on every switch-to-bottom, shearing the left edge off the
-        // whole column (field screenshot). Pin the adjustment to zero.
+        // whole column (field screenshot). Pinning the value to zero was not
+        // enough on its own: reconfigure during allocation moves the whole
+        // geometry (upper/page) and the layout stays wider than the pane, so
+        // the shear survived (second field report). Cure the cause too — when
+        // the adjustment says the content overflows the viewport, walk the
+        // anchored children and clamp any width request past the pane down to
+        // fit. That converges: once nothing demands more than the page, upper
+        // collapses to page_size and the handler goes quiet.
         {
             let hadj = scroller.hadjustment();
             hadj.connect_value_changed(|adj| {
                 if adj.value() != 0.0 {
                     adj.set_value(0.0);
+                }
+            });
+            let view = text_view.downgrade();
+            hadj.connect_changed(move |adj| {
+                if adj.value() != 0.0 {
+                    adj.set_value(0.0);
+                }
+                let page = adj.page_size();
+                if page < 60.0 || adj.upper() <= page + 1.0 {
+                    return;
+                }
+                let Some(view) = view.upgrade() else { return };
+                let fit = page as i32 - 24;
+                let mut child = view.first_child();
+                while let Some(w) = child {
+                    child = w.next_sibling();
+                    let (req_w, _) = w.size_request();
+                    if req_w > fit {
+                        w.set_size_request(fit, -1);
+                    }
                 }
             });
         }
