@@ -56,7 +56,9 @@ pub struct ChatWindow {
 
     /// A popout window is pinned to one buffer: no sidebar, no auto-select,
     /// and the window closes when the buffer does. `None` is a full window.
-    pinned: Option<BufferKey>,
+    /// RefCell because a 2.0 `buffer-renamed` retargets the pin in place —
+    /// the alternative is the close-on-absent rule killing the popout.
+    pinned: RefCell<Option<BufferKey>>,
 
     active: RefCell<Option<BufferKey>>,
 
@@ -565,7 +567,7 @@ impl ChatWindow {
             app: app.clone(),
             window,
             observer_id: Cell::new(0),
-            pinned: pinned.clone(),
+            pinned: RefCell::new(pinned.clone()),
             active: RefCell::new(None),
             buffer_list,
             member_list,
@@ -710,8 +712,8 @@ impl ChatWindow {
     }
 
     /// The buffer this window is pinned to, if it is a popout.
-    pub fn pinned_key(&self) -> Option<&BufferKey> {
-        self.pinned.as_ref()
+    pub fn pinned_key(&self) -> Option<BufferKey> {
+        self.pinned.borrow().clone()
     }
 
     /// Tidy up as this window goes away: dismiss its menu, save its draft, and
@@ -1284,7 +1286,7 @@ impl ChatWindow {
             // means quitting the whole app — but only after confirmation, and
             // only if it isn't the last remaining window regardless. A popout
             // just closes itself.
-            let is_main = this.pinned.is_none();
+            let is_main = this.pinned.borrow().is_none();
             let other_windows = this.app.chat_windows.borrow().len() > 1;
             if is_main && other_windows {
                 this.confirm_quit();
@@ -1489,7 +1491,9 @@ impl ChatWindow {
     // ── Store events ──────────────────────────────────────────────────────
 
     fn on_store_events(self: &Rc<Self>, events: &[StoreEvent]) {
-        let active = self.active.borrow().clone();
+        // Mutable: a BufferRenamed mid-batch moves the active key, and the
+        // arms after it must compare against the NEW identity.
+        let mut active = self.active.borrow().clone();
         for e in events {
             if let StoreEvent::BufferChanged(k) = e {
                 tracing::debug!(
@@ -1529,13 +1533,35 @@ impl ChatWindow {
                         self.app.play_notify_sound("friend_online");
                     }
                 }
+                StoreEvent::BufferRenamed { from, to } => {
+                    // Retarget everything keyed by the old identity BEFORE the
+                    // BufferListChanged that rides behind this frame, or the
+                    // close-on-absent rule below reads the stale key.
+                    if self.pinned.borrow().as_ref() == Some(from) {
+                        *self.pinned.borrow_mut() = Some(to.clone());
+                    }
+                    if active.as_ref() == Some(from) {
+                        *self.active.borrow_mut() = Some(to.clone());
+                        active = Some(to.clone());
+                        *self.drawn.borrow_mut() = Drawn::default();
+                        redraw = true;
+                        remembers = true;
+                    }
+                    for dest in self.pending_whois.borrow_mut().values_mut() {
+                        if dest == from {
+                            *dest = to.clone();
+                        }
+                    }
+                    relist = true;
+                }
                 StoreEvent::BufferListChanged => {
                     relist = true;
                     status = true;
                     // A popout whose buffer was closed (here or on another
                     // device) closes with it — closed = absent (§9.1).
-                    if let Some(key) = &self.pinned {
-                        if self.app.store.borrow().buffer(key).is_none()
+                    let pinned = self.pinned.borrow().clone();
+                    if let Some(key) = pinned {
+                        if self.app.store.borrow().buffer(&key).is_none()
                             && self.app.store.borrow().backlog_complete
                         {
                             self.window.close();
@@ -1568,21 +1594,21 @@ impl ChatWindow {
                     // popout never auto-selects; and if its buffer still has
                     // no row after the burst, absence is proof (§9.1): say so
                     // rather than spinning.
-                    match &self.pinned {
+                    match self.pinned.borrow().clone() {
                         None => {
                             if self.active.borrow().is_none() {
                                 self.select_first_buffer();
                             }
                         }
                         Some(key) => {
-                            if self.app.store.borrow().buffer(key).is_none() {
+                            if self.app.store.borrow().buffer(&key).is_none() {
                                 self.status_label
                                     .set_text("this buffer is not open on the server");
                             }
                         }
                     }
                     #[cfg(debug_assertions)]
-                    if self.pinned.is_none() {
+                    if self.pinned.borrow().is_none() {
                         if let Ok(spec) = std::env::var("SCULLY_TEST_CHANCTL") {
                             if let Some((net, target)) = spec.split_once('/') {
                                 let key = BufferKey::new(net.parse().ok(), target);
@@ -1600,7 +1626,7 @@ impl ChatWindow {
                     // once the burst lands, so popouts can be exercised
                     // headlessly (D-Bus/key injection both proved unreliable).
                     #[cfg(debug_assertions)]
-                    if self.pinned.is_none() {
+                    if self.pinned.borrow().is_none() {
                         if let Ok(spec) = std::env::var("SCULLY_TEST_POPOUT") {
                             if let Some((net, target)) = spec.split_once('/') {
                                 let key = BufferKey::new(net.parse().ok(), target);
@@ -1680,7 +1706,7 @@ impl ChatWindow {
     /// names costs more than it tells you. Wide: hand control back to the
     /// ordinary settings-driven layout.
     fn apply_narrow_layout(self: &Rc<Self>) {
-        if self.pinned.is_some() {
+        if self.pinned.borrow().is_some() {
             return; // a popout is already a single pane
         }
         let was = self.narrow.get();
@@ -1799,7 +1825,7 @@ impl ChatWindow {
         // The nicklist derives its colours from the same palette, but its
         // labels are plain widgets, not retintable tags — rebuild them.
         self.rebuild_member_list();
-        let is_popout = self.pinned.is_some();
+        let is_popout = self.pinned.borrow().is_some();
         let get_str = |key: &str, dflt: &str| {
             self.app.setting(key).as_str().map(str::to_string).unwrap_or_else(|| dflt.to_string())
         };
@@ -1893,7 +1919,7 @@ impl ChatWindow {
     fn update_member_pane(&self) {
         // Narrow mode owns the panes outright — there the nicklist is a
         // separate view reached from a button, not a column.
-        if self.narrow.get() || self.pinned.is_some() {
+        if self.narrow.get() || self.pinned.borrow().is_some() {
             return;
         }
         let is_channel = self.active.borrow().as_ref().is_some_and(|k| k.is_channel());
@@ -1961,7 +1987,7 @@ impl ChatWindow {
     // ── Buffer list ───────────────────────────────────────────────────────
 
     fn rebuild_buffer_list(&self) {
-        if self.pinned.is_some() {
+        if self.pinned.borrow().is_some() {
             return;
         }
         let store = self.app.store.borrow();
@@ -2343,7 +2369,15 @@ impl ChatWindow {
                     right.connect_pressed(move |g, _, _, _| {
                         g.set_state(gtk::EventSequenceState::Claimed);
                         if let Some(this) = weak.upgrade() {
-                            crate::frienddialog::FriendDialog::add(&this.app);
+                            // Favorites era: the contact editor's verbs are
+                            // gone from the server, so point at the live path.
+                            if this.app.store.borrow().favorites_model() {
+                                this.status_label.set_text(
+                                    "friends are favorited DMs now — /friend <nick>, or right-click a nick",
+                                );
+                            } else {
+                                crate::frienddialog::FriendDialog::add(&this.app);
+                            }
                         }
                     });
                     row.add_controller(right);
@@ -2736,7 +2770,7 @@ impl ChatWindow {
 
         self.title_label.set_text(&buf.display_name);
         self.topic_label.set_text(&mirc::strip(buf.topic.as_deref().unwrap_or("")));
-        if self.pinned.is_some() {
+        if self.pinned.borrow().is_some() {
             self.window.set_title(Some(&format!("{} — Scully", buf.display_name)));
         }
 
@@ -5722,6 +5756,25 @@ impl ChatWindow {
             // With a nick, it pre-fills for that person on this network.
             ("friend" | "friends", net) => {
                 let who = args.split_whitespace().next().unwrap_or("");
+                // Favorites era (2.0): a friend IS a favorited DM, and the
+                // contact verbs no longer exist server-side, so the editor
+                // would submit into the void. Favorite directly instead.
+                if self.app.store.borrow().favorites_model() {
+                    match (net, who.is_empty()) {
+                        (Some(net), false) => {
+                            let key = BufferKey::new(Some(net), who);
+                            self.app.open_buffer(&key);
+                            self.app.send(ClientVerb::FavoriteBuffer {
+                                network_id: net,
+                                target: self.app.wire_target(&key),
+                            });
+                        }
+                        _ => self
+                            .status_label
+                            .set_text("friends are favorited DMs now — /friend <nick>, or right-click a nick"),
+                    }
+                    return true;
+                }
                 match (net, who.is_empty()) {
                     (Some(net), false) => {
                         crate::frienddialog::FriendDialog::add_for_nick(&self.app, net, who)

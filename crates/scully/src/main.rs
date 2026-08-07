@@ -267,7 +267,7 @@ pub fn open_chat_window(app: &AppRef) {
 /// rather than stacking duplicates.
 pub fn open_popout(app: &AppRef, key: lurker_proto::BufferKey) {
     if let Some(existing) =
-        app.chat_windows.borrow().iter().find(|w| w.pinned_key() == Some(&key)).cloned()
+        app.chat_windows.borrow().iter().find(|w| w.pinned_key().as_ref() == Some(&key)).cloned()
     {
         existing.present();
         return;

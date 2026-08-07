@@ -33,6 +33,10 @@ pub const MAX_INCREMENTAL_MERGE: usize = 250;
 pub enum StoreEvent {
     /// The buffer list changed shape (a buffer appeared or disappeared).
     BufferListChanged,
+    /// A buffer changed identity (2.0 rename/merge): anything a window keys
+    /// by the old [`BufferKey`] — active buffer, draw cache, pending lookups —
+    /// must move to the new one.
+    BufferRenamed { from: BufferKey, to: BufferKey },
     /// Rows in this buffer changed.
     BufferChanged(BufferKey),
     /// Unread/highlight counts changed; recompute any badge.
@@ -619,6 +623,9 @@ impl Store {
                 // Needs no handler: the event that caused the reopen arrives as
                 // a normal `irc` frame and materializes the buffer (§9.1).
             }
+            ServerFrame::BufferRenamed { network_id, from, to, .. } => {
+                self.apply_buffer_renamed(network_id, &from, &to, &mut out);
+            }
             ServerFrame::BufferCleared { network_id, target, cleared_before_id, .. } => {
                 let key = BufferKey::new(network_id, &target);
                 if let Some(buf) = self.buffers.get_mut(&key) {
@@ -1096,6 +1103,62 @@ impl Store {
         if members_changed {
             out.push(StoreEvent::MembersChanged(key.clone()));
         }
+    }
+
+    /// `buffer-renamed` (2.0): move a buffer to its new target. On a merge the
+    /// pre-existing buffer at the new name was absorbed server-side, so its
+    /// rows fold into the renamed one here; corrected read-state follows in
+    /// its own frame, so counters are carried, not recomputed.
+    fn apply_buffer_renamed(
+        &mut self,
+        network_id: Option<i64>,
+        from: &str,
+        to: &str,
+        out: &mut Vec<StoreEvent>,
+    ) {
+        let old_key = BufferKey::new(network_id, from);
+        let new_key = BufferKey::new(network_id, to);
+        if old_key == new_key {
+            // Same folded identity — a casing change only.
+            if let Some(buf) = self.buffers.get_mut(&old_key) {
+                if buf.display_name != to {
+                    buf.display_name = to.to_string();
+                    out.push(StoreEvent::BufferListChanged);
+                }
+            }
+            return;
+        }
+        // Never held locally: nothing to move, and the next event under the
+        // new name materializes the buffer as usual.
+        let Some(mut buf) = self.buffers.remove(&old_key) else { return };
+        buf.key = new_key.clone();
+        buf.display_name = to.to_string();
+        if let Some(absorbed) = self.buffers.remove(&new_key) {
+            // The renamed buffer is the survivor; union the absorbed shell's
+            // rows in, deduped by id (insert_ordered orders, never dedupes).
+            for ev in absorbed.events {
+                if ev.id.is_none_or(|id| !buf.contains_id(id)) {
+                    buf.insert_ordered(ev);
+                }
+            }
+            for (nick, at) in absorbed.last_spoke {
+                let entry = buf.last_spoke.entry(nick).or_insert(at);
+                *entry = (*entry).max(at);
+            }
+            for (nick, m) in absorbed.members {
+                buf.members.entry(nick).or_insert(m);
+            }
+            buf.has_more_older |= absorbed.has_more_older;
+            buf.pinned |= absorbed.pinned;
+            if buf.draft.is_none() {
+                buf.draft = absorbed.draft;
+            }
+            buf.recompute_newest();
+            buf.trim();
+        }
+        self.buffers.insert(new_key.clone(), buf);
+        out.push(StoreEvent::BufferRenamed { from: old_key, to: new_key });
+        out.push(StoreEvent::BufferListChanged);
     }
 
     fn apply_read_state(&mut self, rs: ReadState, out: &mut Vec<StoreEvent>) {

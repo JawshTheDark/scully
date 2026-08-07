@@ -432,6 +432,25 @@ pub enum ServerFrame {
         #[serde(default)]
         cleared_at: Option<String>,
     },
+    /// A buffer's target changed (2.0: DM buffers follow nick changes, and a
+    /// case-mapping refold can merge twins). The renamed buffer survives under
+    /// `to`; with `merged: true` a pre-existing buffer at that name was
+    /// absorbed into it (`merged_from_buffer_id`), and corrected read-state
+    /// rides in follow-up frames — the client folds rows and drops the shell.
+    #[serde(rename_all = "camelCase")]
+    BufferRenamed {
+        network_id: Option<i64>,
+        #[serde(default)]
+        from: String,
+        #[serde(default)]
+        to: String,
+        #[serde(default)]
+        buffer_id: Option<i64>,
+        #[serde(default)]
+        merged: bool,
+        #[serde(default)]
+        merged_from_buffer_id: Option<i64>,
+    },
     #[serde(rename_all = "camelCase")]
     PinsChanged {
         network_id: Option<i64>,

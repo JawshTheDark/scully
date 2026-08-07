@@ -1116,3 +1116,85 @@ fn removing_a_network_takes_everything_it_owned() {
     assert!(store.networks.contains_key(&2));
     assert!(!store.remove_network(1));
 }
+
+// ── buffer-renamed (2.0) ──────────────────────────────────────────────────
+
+/// The exact wire shape wsHub fans out (upstream wsHub.ts ~2018): a DM buffer
+/// follows its partner's nick change, no collision at the new name.
+#[test]
+fn buffer_renamed_moves_the_buffer_and_reports_both_keys() {
+    let mut store = connected_store();
+    apply(&mut store, backlog("bob", "replace", vec![row(1, "hi")]));
+
+    let out = apply(
+        &mut store,
+        json!({ "kind": "buffer-renamed", "networkId": 1, "from": "bob",
+                "to": "bob_away", "bufferId": 7, "merged": false }),
+    );
+
+    assert!(store.buffer(&key("bob")).is_none(), "old identity is gone");
+    let buf = store.buffer(&key("bob_away")).expect("moved buffer");
+    assert_eq!(buf.display_name, "bob_away");
+    assert_eq!(buf.key, key("bob_away"), "key field re-keyed with the map");
+    assert_eq!(texts(&store, "bob_away"), vec!["hi"], "rows rode along");
+    assert!(
+        out.iter().any(|e| matches!(e, StoreEvent::BufferRenamed { from, to }
+            if *from == key("bob") && *to == key("bob_away"))),
+        "windows are told to retarget"
+    );
+}
+
+/// Collision case: carol → stale_carol where a stale_carol shell already
+/// exists. The renamed buffer survives; the shell's rows fold in, deduped by
+/// id, and the union keeps the pager honest.
+#[test]
+fn buffer_renamed_merge_folds_the_absorbed_shell_in() {
+    let mut store = connected_store();
+    apply(&mut store, backlog("carol", "replace", vec![row(2, "live"), row(3, "shared")]));
+    apply(&mut store, backlog("stale_carol", "replace", vec![row(1, "old"), row(3, "shared")]));
+
+    apply(
+        &mut store,
+        json!({ "kind": "buffer-renamed", "networkId": 1, "from": "carol",
+                "to": "stale_carol", "bufferId": 7, "merged": true,
+                "mergedFromBufferId": 4 }),
+    );
+
+    assert!(store.buffer(&key("carol")).is_none());
+    assert_eq!(
+        texts(&store, "stale_carol"),
+        vec!["old", "live", "shared"],
+        "union ordered by id, shared id deduped"
+    );
+}
+
+/// Same folded identity — a pure casing change retitles without moving state.
+#[test]
+fn buffer_renamed_casing_change_only_retitles() {
+    let mut store = connected_store();
+    apply(&mut store, backlog("dave", "replace", vec![row(1, "hi")]));
+
+    apply(
+        &mut store,
+        json!({ "kind": "buffer-renamed", "networkId": 1, "from": "dave",
+                "to": "Dave", "bufferId": 9, "merged": false }),
+    );
+
+    let buf = store.buffer(&key("dave")).expect("identity unchanged");
+    assert_eq!(buf.display_name, "Dave");
+    assert_eq!(texts(&store, "dave"), vec!["hi"]);
+}
+
+/// A rename for a buffer this client never opened is a no-op, not a
+/// materialization — the next event under the new name builds it as usual.
+#[test]
+fn buffer_renamed_for_an_unheld_buffer_is_ignored() {
+    let mut store = connected_store();
+    let out = apply(
+        &mut store,
+        json!({ "kind": "buffer-renamed", "networkId": 1, "from": "ghost",
+                "to": "ghost2", "bufferId": 11, "merged": false }),
+    );
+    assert!(store.buffer(&key("ghost2")).is_none());
+    assert!(!out.iter().any(|e| matches!(e, StoreEvent::BufferListChanged)));
+}

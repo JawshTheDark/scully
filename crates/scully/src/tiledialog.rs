@@ -260,7 +260,8 @@ fn tile_windows(
         };
         let x = geo.x() + (i % cols) as i32 * cell_w;
         let y = geo.y() + (i / cols) as i32 * cell_h;
-        if let Some(win) = app.chat_windows.borrow().iter().find(|w| w.pinned_key() == Some(key))
+        if let Some(win) =
+            app.chat_windows.borrow().iter().find(|w| w.pinned_key().as_ref() == Some(key))
         {
             win.gtk_window().set_default_size(cell_w, cell_h);
         }
